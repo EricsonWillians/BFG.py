@@ -1,4 +1,5 @@
 import numpy as np
+from collections import OrderedDict
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QProgressBar, QWidget, QHBoxLayout, QSizePolicy
 )
@@ -20,7 +21,8 @@ except ImportError:
 class BloodTextureCache:
     """Cache for pre-generated blood texture frames to avoid real-time generation."""
     _instance = None
-    _cache = {}
+    _cache = OrderedDict()
+    _cache_limit = 120
     
     def __new__(cls):
         if cls._instance is None:
@@ -31,11 +33,11 @@ class BloodTextureCache:
         key = (width, height, frame)
         if key not in self._cache:
             self._cache[key] = self._generate_blood_frame(width, height, frame)
-            # Limit cache size to prevent memory issues
-            if len(self._cache) > 100:
-                # Remove oldest entries
-                oldest_key = next(iter(self._cache))
-                del self._cache[oldest_key]
+        else:
+            value = self._cache.pop(key)
+            self._cache[key] = value
+        if len(self._cache) > self._cache_limit:
+            self._cache.popitem(last=False)
         return self._cache[key]
     
     def _generate_blood_frame(self, width, height, t):

@@ -12,7 +12,7 @@ def test_layout():
     # Create main window
     window = MainWindow()
     
-    print("💀 DOOMED BY PYTHON - Layout Test 💀")
+    print("💀 BFG.py - Layout Test 💀")
     print("=" * 40)
     print("Testing responsive layout...")
     print("Try resizing the window to see how it adapts!")

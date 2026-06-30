@@ -1,26 +1,28 @@
-from PyQt5.QtWidgets import *
-from src import const
-from bs4 import BeautifulSoup
-import requests
+from PyQt5.QtWidgets import (
+    QLabel,
+    QGridLayout,
+    QWidget,
+)
 
 
 class WadFinder(QWidget):
     def __init__(self):
         super().__init__()
         self.initUi()
-        # r = requests.get(
-        #     'https://www.doomworld.com/idgames/levels/doom2/deathmatch/a-c/')
-        # soup = BeautifulSoup(r.text, 'html.parser')
-        # wadListings = soup.findAll("table", {"class": "wadlisting"})
-
-        # print(wadListings)
 
     def initUi(self):
-        self.resize(const.SCREEN_WIDTH, const.SCREEN_HEIGHT)
-        self.setWindowTitle(const.MAIN_WINDOW_TITLE)
+        self.setWindowTitle("WAD Finder (disabled)")
+        self.setToolTip("WAD discovery is currently unavailable from inside the launcher.")
+        self.setEnabled(False)
         self.grid = QGridLayout()
         self.setLayout(self.grid)
-        self.error_dialog = QErrorMessage()
+        self.grid.addWidget(
+            QLabel(
+                "WAD finder is temporarily disabled. Use the Download wads menu item to open the online repository."
+            ),
+            0,
+            0,
+        )
 
     def findWads(self, searchWord):
-        pass
+        return None

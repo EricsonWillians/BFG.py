@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optimization utility for DOOMED BY PYTHON."""
+"""Optimization utility for BFG.py."""
 
 import json
 import os
@@ -21,8 +21,8 @@ def optimize_config():
     
     # Apply performance optimizations
     optimizations = {
-        'animatedBackground': False,  # Disable for maximum performance
-        'performanceMode': True,      # Enable performance mode
+        'animated_background': False,  # Disable for maximum performance
+        'performance_mode': True,      # Enable performance mode
     }
     
     print("\n🔧 Applying performance optimizations:")
@@ -41,10 +41,10 @@ def set_env_vars():
     """Show environment variables for maximum performance."""
     print("\n🌍 For maximum performance, set these environment variables:")
     env_vars = {
-        'DOOMED_ANIMATION_FPS': '15',
-        'DOOMED_ANTIALIASING': 'false',
-        'DOOMED_SCALING_QUALITY': 'fast',
-        'DOOMED_BACKGROUND_ANIM': 'false',
+        'BFG_ANIMATION_FPS': '15',
+        'BFG_ANTIALIASING': 'false',
+        'BFG_SCALING_QUALITY': 'fast',
+        'BFG_BACKGROUND_ANIM': 'false',
     }
     
     for var, value in env_vars.items():
@@ -87,7 +87,7 @@ def check_system():
         print("  ⚠️  Python 3.7+ recommended for better performance")
 
 def main():
-    print("💀 DOOMED BY PYTHON - Performance Optimizer 💀")
+    print("💀 BFG.py - Performance Optimizer 💀")
     print("=" * 50)
     
     if len(sys.argv) > 1 and sys.argv[1] == '--check':

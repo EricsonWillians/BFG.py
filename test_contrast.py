@@ -14,7 +14,7 @@ from pathlib import Path
 class ContrastTestWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("💀 DOOMED BY PYTHON - Contrast Test 💀")
+        self.setWindowTitle("💀 BFG.py - Contrast Test 💀")
         self.setGeometry(100, 100, 800, 600)
         
         # Load theme
@@ -86,7 +86,7 @@ def test_contrast():
     """Test the improved contrast and styling."""
     app = QApplication(sys.argv)
     
-    print("💀 DOOMED BY PYTHON - Contrast Test 💀")
+    print("💀 BFG.py - Contrast Test 💀")
     print("=" * 40)
     print("Testing improved contrast and evil 90s styling...")
     print()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Performance test script for DOOMED BY PYTHON."""
+"""Performance test script for BFG.py."""
 
 import sys
 import time
@@ -14,7 +14,7 @@ from src.performance import perf_settings
 class PerformanceTestWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DOOMED BY PYTHON - Performance Test")
+        self.setWindowTitle("BFG.py - Performance Test")
         self.setGeometry(100, 100, 800, 600)
         
         layout = QVBoxLayout()
@@ -77,7 +77,7 @@ Antialiasing: {perf_settings.get('enable_antialiasing')}
 Scaling Quality: {perf_settings.get('skull_scaling_quality')}"""
             
             self.stats_label.setText(stats_text)
-            
+
         except Exception as e:
             self.stats_label.setText(f"Error monitoring performance: {e}")
 
@@ -85,7 +85,7 @@ def run_performance_test():
     """Run the performance test."""
     app = QApplication(sys.argv)
     
-    print("DOOMED BY PYTHON - Performance Test")
+    print("BFG.py - Performance Test")
     print("=" * 40)
     print("Testing skull rendering performance...")
     print(f"Performance settings:")
@@ -102,9 +102,9 @@ def run_performance_test():
     print("Performance test window opened.")
     print("Watch the stats in the window and close it when done.")
     print("You can set environment variables to test different settings:")
-    print("  DOOMED_ANIMATION_FPS=15 python performance_test.py")
-    print("  DOOMED_ANTIALIASING=true python performance_test.py")
-    print("  DOOMED_SCALING_QUALITY=smooth python performance_test.py")
+    print("  BFG_ANIMATION_FPS=15 python performance_test.py")
+    print("  BFG_ANTIALIASING=true python performance_test.py")
+    print("  BFG_SCALING_QUALITY=smooth python performance_test.py")
     
     sys.exit(app.exec_())
 

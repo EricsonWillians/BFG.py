@@ -1,4 +1,4 @@
-# 💀 DOOMED BY PYTHON 💀
+# 💀 BFG.py 💀
 
 ![screenshot](./assets/screenshot.png)
 
@@ -12,7 +12,7 @@
 ## 🔥 "ABANDON ALL HOPE, YE WHO RUN THIS LAUNCHER" 🔥
 
 Welcome, mortal.  
-You stand at the gateway to **DOOMED BY PYTHON**—a launcher so retro, so blue, so absolutely *cursed* that even your config files might burst into flames.
+You stand at the gateway to **BFG.py**—a launcher so retro, so blue, so absolutely *cursed* that even your config files might burst into flames.
 
 No more batch files. No more hand-editing command lines.  
 Just a *searing*, 90s BBS-inspired interface for GZDoom. Complete with a floating lost soul, ANSI colors, and real modder suffering.
@@ -87,12 +87,12 @@ brew install python3 git
 # Then use Command Prompt or PowerShell for the following steps
 ```
 
-### **Step 3: Clone and Install DOOMED BY PYTHON**
+### **Step 3: Clone and Install BFG.py**
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/doomed-by-python.git
-cd doomed-by-python
+git clone https://github.com/yourname/bfgpy.git
+cd bfgpy
 
 # Create a virtual environment (HIGHLY RECOMMENDED)
 python3 -m venv doom_env
@@ -140,8 +140,8 @@ brew install gzdoom
 
 ```bash
 # 1. Clone and enter the hellish directory
-git clone https://github.com/yourname/doomed-by-python.git
-cd doomed-by-python
+git clone https://github.com/yourname/bfgpy.git
+cd bfgpy
 
 # 2. Install the cursed dependencies
 pip install -r requirements.txt
@@ -259,13 +259,13 @@ The launcher is divided into two main panels:
 
 ## 📸 SCREENSHOT
 
-![DOOMED BY PYTHON in all its hellish glory](./assets/screenshot.png)
+![BFG.py in all its hellish glory](./assets/screenshot.png)
 
 ---
 
 ## ⚡ PERFORMANCE OPTIMIZATIONS
 
-DOOMED BY PYTHON has been optimized for smooth skull rendering and overall performance:
+BFG.py has been optimized for smooth skull rendering and overall performance:
 
 ### 🔧 **Automatic Optimizations**
 - **Frame Caching**: Sprite frames are pre-cached to avoid repeated operations
@@ -279,16 +279,16 @@ Enable **Performance Mode** from the Config menu for maximum speed, or use envir
 
 ```bash
 # Reduce animation FPS for slower machines
-DOOMED_ANIMATION_FPS=15 python main.py
+BFG_ANIMATION_FPS=15 python main.py
 
 # Enable smooth scaling (higher quality, slower)
-DOOMED_SCALING_QUALITY=smooth python main.py
+BFG_SCALING_QUALITY=smooth python main.py
 
 # Enable antialiasing (prettier, slower)
-DOOMED_ANTIALIASING=true python main.py
+BFG_ANTIALIASING=true python main.py
 
 # Disable background animation entirely
-DOOMED_BACKGROUND_ANIM=false python main.py
+BFG_BACKGROUND_ANIM=false python main.py
 ```
 
 ### 📊 **Performance Testing**
@@ -394,7 +394,7 @@ python -c "import sys; print(sys.version)"
 python -c "import PyQt5; print('PyQt5 OK')"
 
 # Try performance mode:
-DOOMED_ANIMATION_FPS=5 python main.py
+BFG_ANIMATION_FPS=5 python main.py
 ```
 
 #### **Animated skull not showing**
@@ -436,19 +436,19 @@ python main.py --no-animations
 
 ```bash
 # Performance tuning
-export DOOMED_ANIMATION_FPS=30
-export DOOMED_CACHE_SIZE=100
-export DOOMED_SCALING_QUALITY=smooth
-export DOOMED_ANTIALIASING=true
-export DOOMED_BACKGROUND_ANIM=false
+export BFG_ANIMATION_FPS=30
+export BFG_CACHE_SIZE=100
+export BFG_SCALING_QUALITY=smooth
+export BFG_ANTIALIASING=true
+export BFG_BACKGROUND_ANIM=false
 
 # Debug options
-export DOOMED_DEBUG=true
-export DOOMED_LOG_LEVEL=DEBUG
+export BFG_DEBUG=true
+export BFG_LOG_LEVEL=DEBUG
 
 # Custom paths
-export DOOMED_CONFIG_DIR=~/.config/doomed-by-python
-export DOOMED_CACHE_DIR=/tmp/doomed-cache
+export BFG_CONFIG_DIR=~/.config/bfgpy
+export BFG_CACHE_DIR=/tmp/bfg-cache
 ```
 
 ### **Configuration File**
@@ -457,18 +457,18 @@ The launcher creates a `config.json` file with your settings:
 
 ```json
 {
-  "lastSourcePort": "/usr/bin/gzdoom",
-  "lastIWad": "/games/doom/DOOM2.WAD",
-  "lastPWads": [
+  "source_port_path": "/usr/bin/gzdoom",
+  "iwad_path": "/games/doom/DOOM2.WAD",
+  "pwad_paths": [
     "/games/doom/mods/brutal_doom.pk3",
     "/games/doom/mods/beautiful_doom.pk3"
   ],
-  "lastOptions": "-skill 4 -fast",
-  "animatedBackground": true,
-  "performanceMode": false,
-  "sourcePortDir": "/usr/bin",
-  "iwadDir": "/games/doom",
-  "pwadDir": "/games/doom/mods"
+  "extra_options": "-skill 4 -fast",
+  "animated_background": true,
+  "performance_mode": false,
+  "source_port_dir": "/usr/bin",
+  "iwad_dir": "/games/doom",
+  "pwad_dir": "/games/doom/mods"
 }
 ```
 
@@ -509,7 +509,7 @@ python -c "
 import json
 with open('config.json', 'r') as f:
     config = json.load(f)
-    for mod in config.get('lastPWads', []):
+    for mod in config.get('pwad_paths', []):
         print(mod)
 "
 ```
@@ -567,7 +567,7 @@ python main.py --test-config --exit-after-launch
 
 ## 🏆 CREDITS & ACKNOWLEDGMENTS
 
-**DOOMED BY PYTHON** was forged in the fires of hell by:
+**BFG.py** was forged in the fires of hell by:
 
 - **Ericson Willians** - Original creator and demon summoner
 - **The DOOM Community** - For keeping the flame alive since 1993
