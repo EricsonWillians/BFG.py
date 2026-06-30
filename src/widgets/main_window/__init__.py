@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import time
+import sys
 from pathlib import Path, PurePath
 from typing import Optional
 
@@ -14,6 +15,7 @@ from PyQt5.QtWidgets import (
     QErrorMessage,
     QGroupBox,
     QHBoxLayout,
+    QFileDialog,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -33,16 +35,17 @@ from .actions.open_source_port_action import OpenSourcePortAction
 from .actions.open_iwad_action import OpenIWadAction
 from .actions.open_pwad_action import OpenPWadAction
 from .actions.open_wad_repository import OpenWadRepository
+from .actions.open_wad_finder import OpenWadFinder
 from .actions.exit_action import ExitAction
 
 from src.widgets.iwad_input import IWadInput
-from src.widgets.pwad_list import PWadList
 from src.widgets.path_input import PathInput
 from src.widgets.launch_button import LaunchButton
 from src.widgets.log_window import LogWindow
-from src.widgets.pwad_info import PWadInfo
 from src.widgets.lost_soul_window import LostSoulWindow
 from src.widgets.doom_soul_widget import DoomSoulWidget
+from src.widgets.mod_panel import ModPanel
+from src.widgets.wad_finder import WadFinder
 
 
 class MainWindow(QMainWindow):
@@ -122,7 +125,15 @@ class MainWindow(QMainWindow):
         self.sourcePortPathInput.setToolTip('Path to gzdoom or zandronum')
         self.sourcePortPathInput.setText(self.config.source_port_path)
         self.sourcePortPathInput.installEventFilter(self)
-        sourcePortLayout.addWidget(self.sourcePortPathInput)
+
+        self.sourcePortBrowseButton = QPushButton('Browse...')
+        self.sourcePortBrowseButton.setToolTip('Select a source port executable')
+        self.sourcePortBrowseButton.clicked.connect(self.browseSourcePort)
+
+        sourcePortInputLayout = QHBoxLayout()
+        sourcePortInputLayout.addWidget(self.sourcePortPathInput, 1)
+        sourcePortInputLayout.addWidget(self.sourcePortBrowseButton, 0)
+        sourcePortLayout.addLayout(sourcePortInputLayout)
 
         self.iwadGroup = QGroupBox("IWAD (Main Game)")
         iwadLayout = QVBoxLayout(self.iwadGroup)
@@ -141,46 +152,15 @@ class MainWindow(QMainWindow):
         iwadInputLayout.addWidget(self.iwadBrowseButton, 0)
         iwadLayout.addLayout(iwadInputLayout)
 
-        self.pwadGroup = QGroupBox("PWADs (Mods)")
-        pwadLayout = QVBoxLayout(self.pwadGroup)
+        self.modPanel = ModPanel(self)
+        self.modPanel.setMods(self.config.pwad_paths)
+        self.modPanel.addRequested.connect(self.openPWadAction._open)
+        self.modPanel.modsChanged.connect(self.saveConfig)
+        self.modPanel.selectedPathsChanged.connect(self.updatePWadInfo)
 
-        self.pwadList = PWadList()
-        self.pwadList.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.pwadList.setMinimumHeight(120)
-        for wad in self.config.pwad_paths:
-            self.pwadList.addWad(wad)
-        self.pwadList.orderChanged.connect(self.saveConfig)
-        pwadLayout.addWidget(self.pwadList)
-
-        self.pwadButtons = QWidget()
-        pwadBtnsLayout = QHBoxLayout(self.pwadButtons)
-        pwadBtnsLayout.setContentsMargins(0, 0, 0, 0)
-        pwadBtnsLayout.setSpacing(4)
-
-        self.pwadAddButton = QPushButton('Add...')
-        self.pwadAddButton.setToolTip('Add PWAD or PK3 files')
-        self.pwadAddButton.clicked.connect(self.openPWadAction._open)
-
-        self.pwadRemoveButton = QPushButton('Remove')
-        self.pwadRemoveButton.setToolTip('Remove selected mods')
-        self.pwadRemoveButton.clicked.connect(self.removeSelectedPWads)
-
-        self.pwadUpButton = QPushButton('↑')
-        self.pwadUpButton.setToolTip('Move selected mods up')
-        self.pwadUpButton.setMaximumWidth(30)
-        self.pwadUpButton.clicked.connect(self.pwadList.moveUp)
-
-        self.pwadDownButton = QPushButton('↓')
-        self.pwadDownButton.setToolTip('Move selected mods down')
-        self.pwadDownButton.setMaximumWidth(30)
-        self.pwadDownButton.clicked.connect(self.pwadList.moveDown)
-
-        pwadBtnsLayout.addWidget(self.pwadAddButton)
-        pwadBtnsLayout.addWidget(self.pwadRemoveButton)
-        pwadBtnsLayout.addStretch()
-        pwadBtnsLayout.addWidget(self.pwadUpButton)
-        pwadBtnsLayout.addWidget(self.pwadDownButton)
-        pwadLayout.addWidget(self.pwadButtons)
+        self.wadFinder = WadFinder(self, library_dir=self.config.pwad_dir or None)
+        self.wadFinder.addRequested.connect(self._on_browser_add)
+        self.wadFinder.statusChanged.connect(self.statusBar().showMessage)
 
         self.optionsGroup = QGroupBox("Extra Options")
         optionsLayout = QVBoxLayout(self.optionsGroup)
@@ -203,14 +183,9 @@ class MainWindow(QMainWindow):
         self.lostSoulWidget.setMinimumSize(180, 180)
         self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        self.pwadInfo = PWadInfo()
-        self.pwadInfo.setMinimumHeight(120)
-        self.pwadInfo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
         self.logWindow = LogWindow(self)
         self.loadingWindow = LostSoulWindow(self)
 
-        self.pwadList.itemSelectionChanged.connect(self.updatePWadInfo)
         self.updatePWadInfo()
 
         self.installResponsiveLayout()
@@ -219,7 +194,11 @@ class MainWindow(QMainWindow):
 
     def createMenu(self):
         self.openSourcePortAction = OpenSourcePortAction(
-            self, self.setSourcePort, self.config, self.saveSourcePortPath
+            self,
+            self.setSourcePort,
+            self.config,
+            self.saveSourcePortPath,
+            browse_handler=self.browseSourcePort,
         )
         self.openIWadAction = OpenIWadAction(
             self, self.setIWad, self.config, self.saveWadPath
@@ -245,6 +224,9 @@ class MainWindow(QMainWindow):
         fileMenu.addAction(self.openSourcePortAction)
         fileMenu.addAction(self.openIWadAction)
         fileMenu.addAction(self.openPWadAction)
+        self.openWadFinderAction = OpenWadFinder(self, self.wadFinder)
+        self.openWadFinderAction.setChecked(True)
+        fileMenu.addAction(self.openWadFinderAction)
         fileMenu.addAction(self.exitAction)
 
         configMenu = menuBar.addMenu('&Config')
@@ -257,13 +239,12 @@ class MainWindow(QMainWindow):
     def installResponsiveLayout(self):
         self.leftLayout.addWidget(self.sourcePortGroup)
         self.leftLayout.addWidget(self.iwadGroup)
-        self.leftLayout.addWidget(self.pwadGroup, 1)
+        self.leftLayout.addWidget(self.modPanel, 1)
         self.leftLayout.addWidget(self.optionsGroup)
         self.leftLayout.addWidget(self.launchButton)
 
         self.rightLayout.addWidget(self.lostSoulWidget, 1)
-        self.rightLayout.addWidget(self.pwadInfo, 1)
-        self.rightLayout.addStretch(0)
+        self.rightLayout.addWidget(self.wadFinder, 1)
 
     def eventFilter(self, source, event):
         if (
@@ -295,23 +276,32 @@ class MainWindow(QMainWindow):
         dialog.setValue(0)
         dialog.show()
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        duplicate_count = 0
+        seen = set()
         try:
             for i, wad in enumerate(wads):
                 dialog.setValue(i)
-                if not self.pwadList.addWad(wad):
+                if wad in seen or wad in self.modPanel.allPaths():
                     msg = f"The wad {wad} has already been added to the wad list."
                     self.errorDialog.showMessage(msg)
+                    duplicate_count += 1
                 QApplication.processEvents()
+                seen.add(wad)
             dialog.setValue(len(wads))
         finally:
             QApplication.restoreOverrideCursor()
             dialog.hide()
+        self.modPanel.addMods(wads)
+        if duplicate_count and duplicate_count == len(wads):
+            self.statusBar().showMessage("No new mods were added.", 2500)
         self.saveConfig()
 
     def removeSelectedPWads(self):
-        for item in self.pwadList.selectedItems():
-            index = self.pwadList.indexOfTopLevelItem(item)
-            self.pwadList.takeTopLevelItem(index)
+        self.modPanel.removeSelected()
+        self.saveConfig()
+
+    def _on_browser_add(self, paths: list):
+        self.modPanel.addMods(paths)
         self.saveConfig()
 
     def center(self):
@@ -328,6 +318,9 @@ class MainWindow(QMainWindow):
         else:
             if filename:
                 self.config.pwad_dir = str(PurePath(filename[0]).parent)
+                if hasattr(self, "wadFinder"):
+                    self.wadFinder.library_dir = Path(self.config.pwad_dir).expanduser()
+                    self.wadFinder._refresh_local_library()
         self.saveConfig()
 
     def saveSourcePortPath(self, filename: str):
@@ -335,6 +328,25 @@ class MainWindow(QMainWindow):
         self.config.source_port_path = filename
         self.sourcePortPathInput.setText(filename)
         self.saveConfig()
+
+    def browseSourcePort(self):
+        start_dir = self.config.source_port_dir or str(Path.home())
+        file_filter = (
+            "Executable files (*.exe);;All files (*.*)"
+            if sys.platform.startswith("win")
+            else "All files (*)"
+        )
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a source port executable",
+            start_dir,
+            file_filter,
+            options=options,
+        )
+        if filename:
+            self.saveSourcePortPath(filename)
 
     def getConfig(self):
         return self.config.to_dict()
@@ -353,7 +365,7 @@ class MainWindow(QMainWindow):
         self.config.source_port_path = self.sourcePortPathInput.text().strip() or "gzdoom"
         self.config.iwad_path = self.iwadInput.text().strip()
         self.config.extra_options = self.extraOptionsInput.text().strip()
-        self.config.pwad_paths = [item.data(0, Qt.UserRole) for item in self.pwadList.getItems()]
+        self.config.pwad_paths = self.modPanel.allPaths()
         self.config.animated_background = self.animatedBgAction.isChecked()
         self.config.performance_mode = self.performanceModeAction.isChecked()
         self.config.render_profile = "low" if self.config.performance_mode else "high"
@@ -363,13 +375,11 @@ class MainWindow(QMainWindow):
     def _set_launch_busy(self, busy: bool):
         controls = [
             self.sourcePortPathInput,
+            self.sourcePortBrowseButton,
             self.iwadInput,
             self.iwadBrowseButton,
-            self.pwadList,
-            self.pwadAddButton,
-            self.pwadRemoveButton,
-            self.pwadUpButton,
-            self.pwadDownButton,
+            self.modPanel,
+            self.wadFinder,
             self.extraOptionsInput,
             self.openSourcePortAction,
             self.openIWadAction,
@@ -524,12 +534,10 @@ class MainWindow(QMainWindow):
             self.launchController.stop_launch()
         super().closeEvent(event)
 
-    def updatePWadInfo(self):
-        paths = [
-            item.data(0, Qt.UserRole)
-            for item in self.pwadList.selectedItems()
-        ]
-        self.pwadInfo.showInfo(paths)
+    def updatePWadInfo(self, paths=None):
+        if paths is None:
+            paths = self.modPanel.selectedPaths()
+        self.modPanel.pwadInfo.showInfo(paths)
 
     def toggleAnimatedBackground(self):
         enabled = self.animatedBgAction.isChecked()

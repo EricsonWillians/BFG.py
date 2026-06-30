@@ -1,18 +1,8 @@
-from PyQt5.QtWidgets import QAction, QFileDialog, QDialog, QFileSystemModel
-from PyQt5.QtCore import QSortFilterProxyModel
-
-
-class ExecutableFilterModel(QSortFilterProxyModel):
-    def filterAcceptsRow(self, source_row, source_index):
-        if isinstance(self.sourceModel(), QFileSystemModel):
-            index = self.sourceModel().index(source_row, 0, source_index)
-            fi = self.sourceModel().fileInfo(index)
-            return fi.isDir() or fi.isExecutable()
-        return super().filterAcceptsRow(source_row, source_index)
-
+import sys
+from PyQt5.QtWidgets import QAction, QFileDialog
 
 class OpenSourcePortAction(QAction):
-    def __init__(self, widget, setSourcePort, config, saveSourcePortPath):
+    def __init__(self, widget, setSourcePort, config, saveSourcePortPath, browse_handler=None):
         super().__init__("&Open Source Port", widget)
         self.widget = widget
         self.setShortcut("Ctrl+O")
@@ -21,18 +11,26 @@ class OpenSourcePortAction(QAction):
         self.setSourcePort = setSourcePort
         self.config = config
         self.saveSourcePortPath = saveSourcePortPath
+        self.browse_handler = browse_handler
 
     def _open(self):
-        proxy_model = ExecutableFilterModel()
+        if self.browse_handler is not None:
+            return self.browse_handler()
+
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-        dialog = QFileDialog(
-            self.widget, "Select a source port", self.config.get(
-                "sourcePortDir")
+        file_filter = (
+            "Executable files (*.exe);;All files (*.*)"
+            if sys.platform.startswith("win")
+            else "All files (*)"
         )
-        dialog.setOptions(options)
-        dialog.setProxyModel(proxy_model)
-        if dialog.exec_() == QDialog.Accepted:
-            filename = dialog.selectedUrls()[0].toLocalFile()
+        filename, _ = QFileDialog.getOpenFileName(
+            self.widget,
+            "Select a source port",
+            self.config.get("sourcePortDir"),
+            file_filter,
+            options=options,
+        )
+        if filename:
             self.saveSourcePortPath(filename)
             self.setSourcePort(filename)
