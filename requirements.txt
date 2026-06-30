@@ -1,3 +1,6 @@
+# Legacy requirements mirror; prefer uv-based workflow with pyproject.toml
+# Install with: uv sync
+
 autopep8==1.5.5
 beautifulsoup4==4.9.3
 certifi==2020.12.5

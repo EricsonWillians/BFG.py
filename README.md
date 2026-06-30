@@ -94,20 +94,11 @@ brew install python3 git
 git clone https://github.com/yourname/bfgpy.git
 cd bfgpy
 
-# Create a virtual environment (HIGHLY RECOMMENDED)
-python3 -m venv doom_env
-
-# Activate the virtual environment
-# On Linux/macOS:
-source doom_env/bin/activate
-# On Windows:
-doom_env\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Install managed dependencies with uv
+uv sync
 
 # Test the installation
-python main.py
+uv run bfg
 ```
 
 ### **Step 4: Install GZDoom (if you don't have it)**
@@ -144,10 +135,10 @@ git clone https://github.com/yourname/bfgpy.git
 cd bfgpy
 
 # 2. Install the cursed dependencies
-pip install -r requirements.txt
+uv sync
 
 # 3. UNLEASH HELL
-python main.py
+uv run bfg
 ```
 
 ### **First Launch Setup**
@@ -279,29 +270,29 @@ Enable **Performance Mode** from the Config menu for maximum speed, or use envir
 
 ```bash
 # Reduce animation FPS for slower machines
-BFG_ANIMATION_FPS=15 python main.py
+BFG_ANIMATION_FPS=15 uv run bfg
 
 # Enable smooth scaling (higher quality, slower)
-BFG_SCALING_QUALITY=smooth python main.py
+BFG_SCALING_QUALITY=smooth uv run bfg
 
 # Enable antialiasing (prettier, slower)
-BFG_ANTIALIASING=true python main.py
+BFG_ANTIALIASING=true uv run bfg
 
 # Disable background animation entirely
-BFG_BACKGROUND_ANIM=false python main.py
+BFG_BACKGROUND_ANIM=false uv run bfg
 ```
 
 ### 📊 **Performance Testing**
 Run the performance test to monitor FPS, memory usage, and CPU:
 
 ```bash
-python performance_test.py
+uv run bfg-perf
 ```
 
 ### 🚀 **Quick Performance Optimization**
 ```bash
 # Run the automatic optimizer
-python optimize.py
+uv run bfg-optimize
 
 # This will:
 # - Disable animated background for max performance
@@ -334,7 +325,7 @@ The interface adapts intelligently to different screen sizes and resolutions:
 
 ### 🎮 **Test the Layout**
 ```bash
-python test_layout.py
+uv run bfg-layout-check
 ```
 
 ---
@@ -346,9 +337,9 @@ python test_layout.py
 #### **"Python not found" or "Command not found"**
 ```bash
 # Try these alternatives:
-python3 main.py
-py main.py          # Windows
-python3.9 main.py   # Specific version
+python3 -m bfg       # Linux/macOS
+uv run bfg           # Any uv-managed environment
+py -m bfg            # Windows
 
 # If still not working, reinstall Python:
 # Make sure to check "Add Python to PATH" during installation
@@ -357,13 +348,13 @@ python3.9 main.py   # Specific version
 #### **"ModuleNotFoundError: No module named 'PyQt5'"**
 ```bash
 # Install PyQt5 specifically:
-pip install PyQt5
+uv add PyQt5
 
 # Or try system package (Linux):
 sudo apt install python3-pyqt5  # Ubuntu/Debian
 sudo pacman -S python-pyqt5     # Arch Linux
 
-# If using virtual environment, make sure it's activated:
+# If using a venv outside uv, make sure it is activated:
 source doom_env/bin/activate     # Linux/macOS
 doom_env\Scripts\activate        # Windows
 ```
@@ -386,21 +377,21 @@ gzdoom --version
 
 #### **Launcher crashes or freezes**
 ```bash
-# Run with debug output:
-python main.py --debug
+# Run a deterministic configuration validation:
+uv run bfg --check-config
 
 # Check system requirements:
 python -c "import sys; print(sys.version)"
 python -c "import PyQt5; print('PyQt5 OK')"
 
 # Try performance mode:
-BFG_ANIMATION_FPS=5 python main.py
+BFG_ANIMATION_FPS=5 uv run bfg
 ```
 
 #### **Animated skull not showing**
 - Check if `assets/lost_soul.gif` exists
 - Try disabling animated background in Config menu
-- Update PyQt5: `pip install --upgrade PyQt5`
+- Update PyQt5: `uv add --dev PyQt5`
 
 ### **Getting Help**
 
@@ -409,7 +400,7 @@ If you're still having issues:
 1. **Check the logs**: Look for error messages in the terminal
 2. **Try minimal setup**: Use just IWAD, no PWADs or extra options
 3. **Test GZDoom directly**: Make sure `gzdoom -iwad /path/to/doom.wad` works
-4. **Update dependencies**: `pip install --upgrade -r requirements.txt`
+4. **Update dependencies**: `uv add --upgrade package_name`
 5. **Create an issue**: Include your OS, Python version, and error messages
 
 ---
@@ -420,20 +411,20 @@ If you're still having issues:
 
 ```bash
 # Validate config and exit (non-zero when invalid)
-python main.py --config my_config.json --check-config
+uv run bfg --config my_config.json --check-config
 
 # Run with explicit launch intent (headless CLI flow)
-python main.py --source-port /usr/games/gzdoom --iwad /games/doom/DOOM2.WAD \
+uv run bfg --source-port /usr/games/gzdoom --iwad /games/doom/DOOM2.WAD \
   --pwad ~/.doom/mods/some_mod.wad --extra-options "-skill 4"
 
 # Run performance test window
-python main.py --performance-test
+uv run bfg --performance-test
 
 # Run without animations
-python main.py --no-animations
+uv run bfg --no-animations
 
 # Headless mode (no Qt windows)
-python main.py --no-gui --exit-after-launch
+uv run bfg --no-gui --exit-after-launch
 ```
 
 ### **Environment Variables**
@@ -522,14 +513,14 @@ with open('config.json', 'r') as f:
 
 ```bash
 # Use with mod managers
-python main.py --pwad-dir ~/.local/share/doom/mods
+uv run bfg --pwad-dir ~/.local/share/doom/mods
 
 # Integration with Steam
-python main.py --source-port ~/.steam/steam/steamapps/common/Doom/gzdoom
+uv run bfg --source-port ~/.steam/steam/steamapps/common/Doom/gzdoom
 
 # Automated testing
-python main.py --check-config
-python main.py --no-gui --exit-after-launch
+uv run bfg --check-config
+uv run bfg --no-gui --exit-after-launch
 ```
 
 ---

@@ -86,7 +86,7 @@ def parse_runtime_options(argv: Optional[List[str]] = None) -> RuntimeOptions:
     parser.add_argument("--source-port")
     parser.add_argument("--iwad")
     parser.add_argument("--pwad-dir")
-    parser.add_argument("--pwad", action="append", default=[])
+    parser.add_argument("--pwad", dest="pwads", action="append", default=[])
     parser.add_argument("--extra-options")
     parser.add_argument("--exit-after-launch", action="store_true")
     parser.add_argument("--check-config", action="store_true")
@@ -184,7 +184,7 @@ class ApplicationRuntime(QObject):
         return f"{source or payload.source_port_path} {' '.join(args)}".strip()
 
     def run_performance_test(self):
-        from performance_test import run_performance_test
+        from bfg.tools.performance_test import run_performance_test
 
         return run_performance_test()
 

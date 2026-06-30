@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bfg-py"
+version = "3.0.0"
+description = "Cross-platform Doom launcher with legacy-compatible UI and automation workflows"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+  "beautifulsoup4>=4.9.3",
+  "numpy>=1.19.0",
+  "Pillow>=8.0.0",
+  "psutil>=5.8.0",
+  "PyQt5>=5.15.2",
+  "PyQt5-sip>=12.8.0",
+  "requests>=2.25.1",
+  "toml>=0.10.2",
+]
+
+[project.scripts]
+bfg = "bfg.cli:main"
+bfg-perf = "bfg.tools.performance_test:run_performance_test"
+bfg-contrast-check = "bfg.tools.test_contrast:test_contrast"
+bfg-layout-check = "bfg.tools.test_layout:test_layout"
+bfg-optimize = "bfg.tools.optimize:main"
+
+[project.optional-dependencies]
+dev = [
+  "autopep8>=1.5.5",
+  "pycodestyle>=2.6.0",
+  "pytest>=8.4.2",
+  "pytest-qt>=4.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "bfg"]
+
+[tool.uv]
+managed = true
