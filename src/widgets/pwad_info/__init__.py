@@ -1,14 +1,43 @@
 import datetime
+import hashlib
 import json
 import os
 import struct
+import tempfile
 import zipfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QGroupBox, QPlainTextEdit, QVBoxLayout
+
+from src.config import LauncherConfig
+
+
+def _asset_cache_path() -> Path:
+    base = os.getenv("BFG_CACHE_DIR")
+    if not base:
+        base = os.path.join(Path.home(), ".cache", "bfg.py")
+    path = Path(base) / "mod_metadata_cache.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def _state_label(state: str) -> str:
+    if state == "cached":
+        return "CACHED"
+    if state == "pending":
+        return "LOADING"
+    if state == "missing":
+        return "MISSING"
+    if state == "error":
+        return "ERROR"
+    return "UNKNOWN"
 
 
 def _wad_details(path: str) -> str:
@@ -70,19 +99,22 @@ def describe(path: str) -> str:
 
 
 class _ModInfoCache:
-    """Simple bounded cache for mod metadata with optional on-disk fallback."""
+    """Persistent bounded metadata cache with integrity-safe writes."""
 
-    _MAX_ENTRIES = 300
-    _cache: "OrderedDict[str, str]" = OrderedDict()
-    _cache_file = Path(".bfg_mod_info_cache.json")
+    _MAX_ENTRIES = 500
+    _MAX_BYTES = 4_000_000
+    _TTL_SECONDS = 24 * 60 * 60
+    _cache_file = _asset_cache_path()
+    _cache: OrderedDict[str, Dict] = OrderedDict()
 
     @classmethod
     def _cache_key(cls, path: str) -> str:
         try:
             stat = os.stat(path)
-            return f"{Path(path).resolve()}::{stat.st_size}::{stat.st_mtime_ns}"
+            digest = f"{Path(path).resolve()}::{stat.st_size}::{stat.st_mtime_ns}"
         except OSError:
-            return f"{Path(path).resolve()}::missing"
+            digest = f"{Path(path).resolve()}::missing"
+        return hashlib.sha256(digest.encode("utf-8")).hexdigest()
 
     @classmethod
     def load(cls):
@@ -93,39 +125,100 @@ class _ModInfoCache:
                 payload = json.load(fp)
             if not isinstance(payload, dict):
                 return
-            for key in list(payload.keys())[: cls._MAX_ENTRIES]:
-                if isinstance(payload[key], str):
-                    cls._cache[key] = payload[key]
+
+            now = int(datetime.datetime.now().timestamp())
+            for key, raw in list(payload.items()):
+                if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+                    continue
+                if now - int(raw.get("cached_at", 0)) > cls._TTL_SECONDS:
+                    continue
+                cls._cache[key] = {
+                    "text": raw["text"],
+                    "cached_at": int(raw.get("cached_at", now)),
+                    "size": len(raw["text"]) if raw.get("text") else 0,
+                }
+
+            cls._cache = OrderedDict(
+                sorted(cls._cache.items(), key=lambda pair: pair[1]["cached_at"])  
+            )
         except (OSError, json.JSONDecodeError):
             return
 
     @classmethod
     def _flush(cls):
+        payload = {
+            key: {
+                "text": value["text"],
+                "cached_at": value.get("cached_at", int(datetime.datetime.now().timestamp())),
+                "size": value.get("size", len(value.get("text", ""))),
+            }
+            for key, value in cls._cache.items()
+            if isinstance(value, dict) and isinstance(value.get("text"), str)
+        }
+        if not payload:
+            try:
+                if cls._cache_file.exists():
+                    cls._cache_file.unlink()
+            except OSError:
+                pass
+            return
+
+        tmp = cls._cache_file.with_suffix(".tmp")
         try:
-            with cls._cache_file.open("w", encoding="utf-8") as fp:
-                json.dump(cls._cache, fp)
+            with tmp.open("w", encoding="utf-8") as fp:
+                json.dump(payload, fp)
+            tmp.replace(cls._cache_file)
         except OSError:
-            pass
+            return
+
+    @classmethod
+    def _enforce_limits(cls):
+        max_bytes = max(256_000, int(LauncherConfig().performance.mod_cache_bytes))
+        max_entries = max(1, int(LauncherConfig().performance.mod_cache_entries))
+        total_bytes = 0
+        for value in cls._cache.values():
+            total_bytes += int(value.get("size", 0))
+
+        now = int(datetime.datetime.now().timestamp())
+        for key in list(cls._cache.keys()):
+            entry = cls._cache[key]
+            if now - int(entry.get("cached_at", 0)) > cls._TTL_SECONDS:
+                cls._cache.pop(key)
+
+        while len(cls._cache) > max_entries or total_bytes > max_bytes:
+            if not cls._cache:
+                break
+            _, entry = cls._cache.popitem(last=False)
+            total_bytes -= int(entry.get("size", 0))
 
     @classmethod
     def get(cls, path: str) -> Optional[str]:
         key = cls._cache_key(path)
-        if key not in cls._cache:
+        entry = cls._cache.get(key)
+        if not entry:
             return None
-        value = cls._cache.pop(key)
-        cls._cache[key] = value
-        return value
+        entry = dict(entry)
+        cached = entry.get("text")
+        if not isinstance(cached, str):
+            return None
+
+        cls._cache.pop(key)
+        cls._cache[key] = entry
+        return cached
 
     @classmethod
-    def set(cls, path: str, text: str):
+    def set(cls, path: str, text: str) -> None:
+        if not text:
+            return
         key = cls._cache_key(path)
-        cls._cache[key] = text
-        if len(cls._cache) > cls._MAX_ENTRIES:
-            cls._cache.popitem(last=False)
+        cls._cache[key] = {
+            "text": text,
+            "cached_at": int(datetime.datetime.now().timestamp()),
+            "size": len(text),
+        }
+        cls._cache.move_to_end(key)
+        cls._enforce_limits()
         cls._flush()
-
-
-_ModInfoCache.load()
 
 
 class _ModInfoSignals(QObject):
@@ -147,12 +240,64 @@ class ModInfoWorker(QRunnable):
         total = len(self.paths)
         try:
             for index, path in enumerate(self.paths, start=1):
+                if not os.path.isfile(path):
+                    self.signals.progress.emit(self.request_id, index, total, path, "")
+                    continue
                 text = describe(path)
                 payload[path] = text
                 self.signals.progress.emit(self.request_id, index, total, path, text)
             self.signals.finished.emit(self.request_id, payload)
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - defensive
             self.signals.error.emit(self.request_id, str(exc))
+
+
+class ModMetadataService(QObject):
+    """Worker service with explicit request IDs and cancellation."""
+
+    result_ready = pyqtSignal(int, dict)
+    progress = pyqtSignal(int, int, int, str, str)
+    failed = pyqtSignal(int, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._worker_pool = QThreadPool.globalInstance()
+        self._last_token = 0
+        self._cancelled = set()
+
+    def request(self, paths: List[str], token: int) -> None:
+        self._last_token = token
+        if token in self._cancelled:
+            self._cancelled.remove(token)
+
+        worker = ModInfoWorker(token, list(paths))
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.finished.connect(self._on_finished)
+        worker.signals.error.connect(self._on_failed)
+        self._worker_pool.start(worker)
+
+    def cancel(self, token: int) -> None:
+        self._cancelled.add(token)
+
+    def _is_canceled(self, token: int) -> bool:
+        return token in self._cancelled
+
+    def _on_progress(self, token: int, done: int, total: int, path: str, text: str):
+        if self._is_canceled(token):
+            return
+        self.progress.emit(token, done, total, path, text)
+
+    def _on_finished(self, token: int, payload: dict):
+        if self._is_canceled(token):
+            return
+        for path, text in payload.items():
+            if text:
+                _ModInfoCache.set(path, text)
+        self.result_ready.emit(token, payload)
+
+    def _on_failed(self, token: int, error: str):
+        if self._is_canceled(token):
+            return
+        self.failed.emit(token, error)
 
 
 class PWadInfo(QGroupBox):
@@ -174,91 +319,90 @@ class PWadInfo(QGroupBox):
         layout.addWidget(self.text)
         self.setLayout(layout)
 
-        # Keep bounded per-session cache and use a global worker pool for scanning.
-        self._worker_pool = QThreadPool.globalInstance()
+        self._worker = ModMetadataService(self)
         self._request_id = 0
         self._active_request_id = 0
         self._last_paths: List[str] = []
-        self._active_payload: Dict[str, str] = {}
+        self._last_state: Dict[str, str] = {}
+
+        self._worker.result_ready.connect(self._on_worker_result)
+        self._worker.progress.connect(self._on_worker_progress)
+        self._worker.failed.connect(self._on_worker_failed)
+
+        _ModInfoCache.load()
 
     def showInfo(self, paths):
-        """Display information for selected mod paths asynchronously."""
         self._request_id += 1
         request_id = self._request_id
+
+        if self._active_request_id:
+            self._worker.cancel(self._active_request_id)
+
         self._active_request_id = request_id
         self._last_paths = list(paths)
-        self._active_payload = {}
+        self._last_state = {}
 
         if not self._last_paths:
             self.text.setPlainText("Select a mod to inspect file details")
             return
 
-        cached = []
-        missing = []
-        for path in self._last_paths:
-            cached_text = _ModInfoCache.get(path)
-            if cached_text is None:
-                missing.append(path)
-            else:
-                cached.append((path, cached_text))
-
-        if not missing:
-            self._render_result(len(self._last_paths), len(self._last_paths))
-            return
-
-        for path, text in cached:
-            self._active_payload[path] = text
-        self.text.setPlainText(
-            f"Loading mod metadata ({len(self._last_paths)} file(s))..."
-        )
-        worker = ModInfoWorker(request_id, missing)
-        worker.signals.progress.connect(self._on_worker_progress)
-        worker.signals.finished.connect(self._on_worker_finished)
-        worker.signals.error.connect(self._on_worker_error)
-        self._worker_pool.start(worker)
-
-    def _render_result(self, done: int, total: int) -> None:
-        ordered = []
+        pending = []
         for path in self._last_paths:
             cached = _ModInfoCache.get(path)
-            if cached is not None:
-                ordered.append(cached)
+            if cached is None:
+                if os.path.exists(path):
+                    self._last_state[path] = "pending"
+                    pending.append(path)
+                else:
+                    self._last_state[path] = "missing"
+            else:
+                self._last_state[path] = "cached"
                 continue
 
-            cached = self._active_payload.get(path)
-            if cached is not None:
-                ordered.append(cached)
-            elif done >= total:
-                ordered.append(f"Path: {path}\nMissing or unreadable file")
-            else:
-                ordered.append(f"Path: {path}\n(Scanning...)")
+        self._render()
+        if not pending:
+            return
 
-        text = "\n\n".join(ordered)
-        if total:
-            text += f"\n\nProgress: {done}/{total}"
-        self.text.setPlainText(text)
+        self._worker.request(pending, request_id)
 
     def _on_worker_progress(self, request_id: int, done: int, total: int, path: str, text: str):
         if request_id != self._active_request_id:
             return
-        self._active_payload[path] = text
-        _ModInfoCache.set(path, text)
-        self._render_result(done, total)
+        self._last_state[path] = "cached" if text else "error"
+        self._render(done=done, total=total)
 
-    def _on_worker_finished(self, request_id: int, payload: Dict[str, str]):
+    def _on_worker_result(self, request_id: int, payload: Dict[str, str]):
         if request_id != self._active_request_id:
             return
         for path, text in payload.items():
-            self._active_payload[path] = text
+            if text:
+                self._last_state[path] = "cached"
+            else:
+                self._last_state[path] = "error"
             _ModInfoCache.set(path, text)
-        self._render_result(len(self._last_paths), len(self._last_paths))
+        self._render(done=len(self._last_paths), total=len(self._last_paths))
 
-    def _on_worker_error(self, request_id: int, error_message: str):
+    def _on_worker_failed(self, request_id: int, error_message: str):
         if request_id != self._active_request_id:
             return
-        if not self._last_paths:
-            self.text.setPlainText("No mod files selected.")
-            return
-        self.text.setPlainText(
-            f"Failed to read mod metadata.\n{error_message}"
-        )
+        self.text.setPlainText(f"Failed to read mod metadata: {error_message}")
+
+    def _render(self, done: int = 0, total: int = 0) -> None:
+        blocks = []
+        for path in self._last_paths:
+            state = self._last_state.get(path, "missing")
+            cached = _ModInfoCache.get(path)
+            if cached is not None:
+                state = "cached"
+                blocks.append(f"[{_state_label(state)}] {path}\n{cached}")
+            elif state == "pending":
+                blocks.append(f"[{_state_label('pending')}] {path}\nScanning...")
+            elif state == "missing":
+                blocks.append(f"[{_state_label('missing')}] {path}\nPath is missing or invalid.")
+            else:
+                blocks.append(f"[{_state_label('error')}] {path}\nUnable to read metadata.")
+
+        text = "\n\n".join(blocks)
+        if done and total:
+            text += f"\n\nProgress: {done}/{total}"
+        self.text.setPlainText(text)

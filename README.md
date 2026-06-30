@@ -419,17 +419,21 @@ If you're still having issues:
 ### **Command Line Arguments**
 
 ```bash
-# Run with specific configuration
-python main.py --config my_config.json
+# Validate config and exit (non-zero when invalid)
+python main.py --config my_config.json --check-config
 
-# Debug mode with verbose output
-python main.py --debug --verbose
+# Run with explicit launch intent (headless CLI flow)
+python main.py --source-port /usr/games/gzdoom --iwad /games/doom/DOOM2.WAD \
+  --pwad ~/.doom/mods/some_mod.wad --extra-options "-skill 4"
 
-# Performance testing mode
+# Run performance test window
 python main.py --performance-test
 
-# Disable all animations
+# Run without animations
 python main.py --no-animations
+
+# Headless mode (no Qt windows)
+python main.py --no-gui --exit-after-launch
 ```
 
 ### **Environment Variables**
@@ -524,7 +528,8 @@ python main.py --pwad-dir ~/.local/share/doom/mods
 python main.py --source-port ~/.steam/steam/steamapps/common/Doom/gzdoom
 
 # Automated testing
-python main.py --test-config --exit-after-launch
+python main.py --check-config
+python main.py --no-gui --exit-after-launch
 ```
 
 ---

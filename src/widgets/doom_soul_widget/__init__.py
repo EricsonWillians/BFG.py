@@ -13,36 +13,34 @@ from PyQt5.QtGui import QImage, QPainter, QMovie, QPixmap
 from PyQt5.QtWidgets import QApplication, QSizePolicy, QWidget
 from PIL import Image
 
-from src.performance import perf_settings
+from src.performance import animation_runtime, perf_settings
 
 _TILE_CACHE = OrderedDict()
-_TILE_CACHE_MAX_FILES = 8
+
+
+def _cache_limit_bytes() -> int:
+    return max(512_000, int(perf_settings.get("tile_cache_max_bytes", 4_000_000)))
+
+
+def _cache_ttl_seconds() -> int:
+    return max(10, int(perf_settings.get("tile_cache_ttl_seconds", 120)))
 
 
 def generate_hell_tile_array(width, height, seed=None):
-    """
-    Optimized hellish background tile generation using vectorized operations.
-    Returns: np.ndarray (height, width, 4) RGBA
-    """
     if seed is not None:
         np.random.seed(seed)
 
-    # Create coordinate grids for vectorized operations
     y_coords, x_coords = np.mgrid[0:height, 0:width]
-
-    # Vectorized sinusoidal base calculations
     r = np.clip(26 + 32 * np.sin(0.11 * y_coords + 0.19 * x_coords) + 38, 0, 255)
     g = np.clip(7 + 9 * np.cos(0.19 * y_coords + 0.13 * x_coords), 0, 255)
     b = np.clip(2 + 6 * np.sin(0.09 * x_coords - 0.11 * y_coords), 0, 255)
 
-    # Create the array
     arr = np.zeros((height, width, 4), dtype=np.uint8)
     arr[:, :, 0] = r
     arr[:, :, 1] = g
     arr[:, :, 2] = b
     arr[:, :, 3] = 255
 
-    # Simplified crack generation (fewer cracks for performance)
     cracks = np.random.rand(3, 4) * np.array([[width, height, 2 * np.pi, width / 3]])
     for cx, cy, a, l in cracks:
         t_vals = np.arange(0, int(l), 2)
@@ -53,15 +51,13 @@ def generate_hell_tile_array(width, height, seed=None):
             x_slice = slice(max(0, px[i] - 1), min(width, px[i] + 2))
             arr[y_slice, x_slice, :3] = 0
 
-    # Reduced ember count for performance
-    ember_count = (width * height) // 1280
+    ember_count = max(1, (width * height) // 1280)
     for _ in range(int(ember_count)):
         ex, ey = np.random.randint(0, width), np.random.randint(0, height)
         radius = np.random.randint(2, 4)
         y_slice = slice(max(0, ey - radius), min(height, ey + radius + 1))
         x_slice = slice(max(0, ex - radius), min(width, ex + radius + 1))
 
-        # Vectorized ember glow
         dy, dx = np.mgrid[y_slice, x_slice] - np.array([[ey], [ex]])
         dist = np.sqrt(dx * dx + dy * dy)
         mask = dist <= radius
@@ -70,7 +66,6 @@ def generate_hell_tile_array(width, height, seed=None):
         arr[y_slice, x_slice, 0] = np.where(mask, np.clip(arr[y_slice, x_slice, 0] + glow, 0, 255), arr[y_slice, x_slice, 0])
         arr[y_slice, x_slice, 1] = np.where(mask, np.clip(arr[y_slice, x_slice, 1] + glow // 3, 0, 255), arr[y_slice, x_slice, 1])
 
-    # Vectorized vignette
     cy, cx = height / 2, width / 2
     d = np.sqrt((x_coords - cx) ** 2 + (y_coords - cy) ** 2)
     fade = 0.85 + 0.15 * np.cos(np.pi * d / (0.7 * max(width, height)))
@@ -88,17 +83,54 @@ def _make_tile_key(width: int, height: int, seed: Optional[int]) -> Tuple[int, i
     return (width, height, int(seed or 0))
 
 
+def _cleanup_cache(force: bool = False):
+    max_bytes = _cache_limit_bytes()
+    ttl = _cache_ttl_seconds()
+    now = time.time()
+    total = 0
+    for entry in _TILE_CACHE.values():
+        total += entry["size"]
+
+    # Remove expired files first.
+    for key in list(_TILE_CACHE.keys()):
+        entry = _TILE_CACHE[key]
+        if force or now - entry["last_used"] > ttl:
+            _TILE_CACHE.pop(key, None)
+            try:
+                if os.path.isfile(entry["path"]):
+                    os.remove(entry["path"])
+            except OSError:
+                pass
+
+    # Then trim LRU by bytes.
+    for key in list(_TILE_CACHE.keys()):
+        if total <= max_bytes:
+            break
+        key_to_evict, evict_entry = _TILE_CACHE.popitem(last=False)
+        total -= evict_entry["size"]
+        try:
+            if os.path.isfile(evict_entry["path"]):
+                os.remove(evict_entry["path"])
+        except OSError:
+            pass
+
+        if key_to_evict == key and key not in _TILE_CACHE:
+            break
+
+
 def ensure_tile_file(tile_w: int, tile_h: int, seed=None, keep_existing: bool = False):
-    """Return a shared temp file path for a pre-generated tile."""
     if tile_w <= 0 or tile_h <= 0:
         tile_w = max(1, tile_w)
         tile_h = max(1, tile_h)
+
     seed = int(seed) if seed is not None else int(time.time())
     key = _make_tile_key(tile_w, tile_h, seed)
 
+    now = time.time()
     if key in _TILE_CACHE:
         entry = _TILE_CACHE.pop(key)
         entry["refcount"] += 1
+        entry["last_used"] = now
         _TILE_CACHE[key] = entry
         return entry["path"]
 
@@ -111,55 +143,43 @@ def ensure_tile_file(tile_w: int, tile_h: int, seed=None, keep_existing: bool = 
         save_hell_tile_png(arr, path)
         arr_path = path
 
-    _TILE_CACHE[key] = {"path": arr_path, "refcount": 1, "last_used": time.time()}
+    try:
+        size = os.path.getsize(arr_path)
+    except OSError:
+        size = 0
+
+    _TILE_CACHE[key] = {
+        "path": arr_path,
+        "refcount": 1,
+        "last_used": now,
+        "size": size,
+    }
     _TILE_CACHE.move_to_end(key)
-    _cleanup_tile_cache()
+    _cleanup_cache()
     return arr_path
 
 
 def release_tile_file(tile_w: int, tile_h: int, seed=None, path: Optional[str] = None):
-    seed = int(seed) if seed is not None else None
-    key = _make_tile_key(tile_w, tile_h, seed or 0)
+    seed = int(seed) if seed is not None else int(time.time())
+    key = _make_tile_key(tile_w, tile_h, seed)
     entry = _TILE_CACHE.get(key)
     if not entry:
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         return
     entry["refcount"] = max(0, entry["refcount"] - 1)
+    entry["last_used"] = time.time()
     _TILE_CACHE[key] = entry
     if entry["refcount"] <= 0:
-        _cleanup_tile_cache(force=True)
+        _cleanup_cache(force=True)
 
 
-def _cleanup_tile_cache(force=False):
-    while len(_TILE_CACHE) > _TILE_CACHE_MAX_FILES:
-        old_key, old = _TILE_CACHE.popitem(last=False)
-        _remove_tile_file(old["path"])
-
-    if force:
-        for key in list(_TILE_CACHE.keys()):
-            entry = _TILE_CACHE[key]
-            if entry["refcount"] > 0:
-                continue
-            _TILE_CACHE.pop(key)
-            _remove_tile_file(entry["path"])
-
-
-def _remove_tile_file(path: str):
-    try:
-        if os.path.isfile(path):
-            os.remove(path)
-    except OSError:
-        pass
-
-
-def get_temp_tile_path(tag="bfg_hell_tile"):
-    if not tag:
-        return ""
-    return ensure_tile_file(
-        96,
-        64,
-        seed=int(datetime.now().strftime('%Y%m%d')),
-        keep_existing=perf_settings.get("persistent_tile_cache", True),
-    )
+def get_temp_tile_path():
+    return ensure_tile_file(96, 64, seed=int(datetime.now().strftime('%Y%m%d')),
+                           keep_existing=perf_settings.get("persistent_tile_cache", True))
 
 
 class DoomSoulWidget(QWidget):
@@ -167,11 +187,14 @@ class DoomSoulWidget(QWidget):
         super().__init__(parent)
         self.setMinimumSize(180, 180)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         self._tile_w, self._tile_h = tile_w, tile_h
         self._tile_seed = int(datetime.now().strftime('%Y%m%d'))
         self._animated_background = animated_background
         self._tile_path = None
         self._tile_key = None
+        self._dropped_ticks = 0
+        self._target_fps = max(8, int(perf_settings.get("animation_fps", 20)))
 
         if self._animated_background:
             self._tile_key = (self._tile_w, self._tile_h, self._tile_seed)
@@ -192,7 +215,7 @@ class DoomSoulWidget(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         if self._animated_background:
-            self._timer.start(perf_settings.get_timer_interval())
+            self._timer.start(animation_runtime.get_interval())
 
         self.skull_gif = QMovie(skull_gif_path)
         self.skull_gif.jumpToFrame(0)
@@ -200,18 +223,28 @@ class DoomSoulWidget(QWidget):
         self.skull_gif.frameChanged.connect(self.updateSkullFrame)
         self.skull_gif.start()
 
+    def _timer_interval(self) -> int:
+        fps = max(8, int(perf_settings.get("animation_fps", 20)))
+        if not self._animated_background:
+            return max(8, 1000 // fps)
+        return animation_runtime.get_interval()
+
     def updateSkullFrame(self, idx):
-        # Cache the frame conversion to avoid repeated operations
         frame = self.skull_gif.currentPixmap().toImage().convertToFormat(QImage.Format_ARGB32)
         self.skull_frame = frame
         self._cached_skull = None
         self.update()
 
     def _tick(self):
-        if self._animated_background:
+        if self._animated_background and self._tile_pixmap and self.isVisible():
             self._scroll = (self._scroll + 1) % max(1, self._tile_w)
-            if self._scroll % 2 == 0:
-                self.update()
+            should_draw = animation_runtime.should_render(self._target_fps, self._dropped_ticks)
+            if should_draw:
+                self._dropped_ticks = 0
+                if self._scroll % 2 == 0:
+                    self.update()
+            else:
+                self._dropped_ticks += 1
 
     def paintEvent(self, event):
         w, h = self.width(), self.height()
@@ -245,13 +278,12 @@ class DoomSoulWidget(QWidget):
             painter.drawImage(sx, sy, self._cached_skull)
 
     def setAnimatedBackground(self, enabled):
-        """Enable or disable animated background."""
-        if self._animated_background == enabled:
+        if self._animated_background == bool(enabled):
             return
-        self._animated_background = enabled
+        self._animated_background = bool(enabled)
         self._timer.stop()
 
-        if enabled:
+        if self._animated_background:
             if not self._tile_pixmap:
                 self._tile_key = (self._tile_w, self._tile_h, self._tile_seed)
                 self._tile_path = ensure_tile_file(
@@ -261,11 +293,14 @@ class DoomSoulWidget(QWidget):
                     keep_existing=perf_settings.get("persistent_tile_cache", True),
                 )
                 self._tile_pixmap = QPixmap(self._tile_path)
-            self._timer.start(perf_settings.get_timer_interval())
+            self._timer.start(self._timer_interval())
         else:
-            if self._tile_pixmap and self._tile_key and self._tile_path:
+            if self._tile_pixmap and self._tile_path:
                 release_tile_file(*self._tile_key, path=self._tile_path)
                 self._tile_pixmap = None
+                self._tile_key = None
+                self._tile_path = None
+
         self.update()
 
     def _tile_scroll_adjust(self):
@@ -281,7 +316,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     skull_gif = os.path.join(os.path.dirname(__file__), "assets", "lost_soul.gif")
     w = DoomSoulWidget(skull_gif)
-    w.setWindowTitle("DOOM Soul Widget - Pre-generated Hell Tile (Super Optimized)")
+    w.setWindowTitle("DOOM Soul Widget")
     w.resize(320, 320)
     w.show()
     sys.exit(app.exec_())

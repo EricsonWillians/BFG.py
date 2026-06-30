@@ -1,5 +1,9 @@
-import sys
+from __future__ import annotations
+
+import shlex
+import time
 from pathlib import Path, PurePath
+from typing import Optional
 
 from PyQt5.Qt import Qt
 from PyQt5.QtCore import QEvent
@@ -21,20 +25,9 @@ from PyQt5.QtWidgets import (
 )
 
 from src import const
-from src.config import ConfigStore
-from src.launch_controller import LaunchController
-
-try:
-    from src.performance import perf_settings
-except ImportError:
-    # Fallback if performance module has issues
-    class FallbackPerfSettings:
-        def get(self, key, default=None):
-            return default
-
-        def set(self, key, value):
-            pass
-    perf_settings = FallbackPerfSettings()
+from src.launch_controller import LaunchOrchestrator, build_launch_args
+from src.runtime import ApplicationRuntime
+from src.performance import perf_settings
 
 from .actions.open_source_port_action import OpenSourcePortAction
 from .actions.open_iwad_action import OpenIWadAction
@@ -53,26 +46,31 @@ from src.widgets.doom_soul_widget import DoomSoulWidget
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, runtime: Optional[ApplicationRuntime] = None):
         super().__init__()
-        self.configStore = ConfigStore("config.json")
-        self.config = self.configStore.load().normalized()
-        self.launchController = LaunchController(self)
+        self.runtime = runtime or ApplicationRuntime()
+        self.config = self.runtime.config.normalized()
+
+        self.launchController = self.runtime.launch_orchestrator
         self.launchController.state_changed.connect(self._on_launch_state_changed)
-        self.launchController.output.connect(self._on_launch_output)
+        self.launchController.output_line.connect(self._on_launch_output)
         self.launchController.finished.connect(self._on_launch_finished)
         self.launchController.error.connect(self._on_launch_error)
+
+        self._last_launch_status = {
+            "start": None,
+            "exit_code": None,
+            "failure": None,
+        }
 
         self.initUi()
 
     def initUi(self):
-        # Set minimum and preferred sizes for better scaling
         self.setMinimumSize(640, 480)
         self.resize(const.SCREEN_WIDTH, const.SCREEN_HEIGHT)
         self.center()
         self.setWindowTitle(const.MAIN_WINDOW_TITLE)
 
-        # Create central widget with responsive layout
         self.centralWidget = QWidget()
         self.setupResponsiveLayout()
         self.setCentralWidget(self.centralWidget)
@@ -83,7 +81,6 @@ class MainWindow(QMainWindow):
         self.createMenu()
         self.addWidgets()
 
-        # Load Norton Commander inspired theme
         theme_file = Path('assets/nc_theme.qss')
         if theme_file.exists():
             with open(theme_file, 'r') as fh:
@@ -116,9 +113,8 @@ class MainWindow(QMainWindow):
 
     def addWidgets(self):
         self.config = self.config.normalized()
-        self.config.render_profile = "low" if self.config.performance_mode else self.config.render_profile
+        self.config.render_profile = self.config.render_profile
 
-        # Source Port section
         self.sourcePortGroup = QGroupBox("Source Port")
         sourcePortLayout = QVBoxLayout(self.sourcePortGroup)
 
@@ -128,7 +124,6 @@ class MainWindow(QMainWindow):
         self.sourcePortPathInput.installEventFilter(self)
         sourcePortLayout.addWidget(self.sourcePortPathInput)
 
-        # IWAD section
         self.iwadGroup = QGroupBox("IWAD (Main Game)")
         iwadLayout = QVBoxLayout(self.iwadGroup)
 
@@ -146,7 +141,6 @@ class MainWindow(QMainWindow):
         iwadInputLayout.addWidget(self.iwadBrowseButton, 0)
         iwadLayout.addLayout(iwadInputLayout)
 
-        # PWAD section
         self.pwadGroup = QGroupBox("PWADs (Mods)")
         pwadLayout = QVBoxLayout(self.pwadGroup)
 
@@ -158,7 +152,6 @@ class MainWindow(QMainWindow):
         self.pwadList.orderChanged.connect(self.saveConfig)
         pwadLayout.addWidget(self.pwadList)
 
-        # PWAD buttons
         self.pwadButtons = QWidget()
         pwadBtnsLayout = QHBoxLayout(self.pwadButtons)
         pwadBtnsLayout.setContentsMargins(0, 0, 0, 0)
@@ -189,7 +182,6 @@ class MainWindow(QMainWindow):
         pwadBtnsLayout.addWidget(self.pwadDownButton)
         pwadLayout.addWidget(self.pwadButtons)
 
-        # Extra Options section
         self.optionsGroup = QGroupBox("Extra Options")
         optionsLayout = QVBoxLayout(self.optionsGroup)
 
@@ -199,14 +191,11 @@ class MainWindow(QMainWindow):
         self.extraOptionsInput.installEventFilter(self)
         optionsLayout.addWidget(self.extraOptionsInput)
 
-        self.launchButton = LaunchButton(
-            text="*** UNLEASH HELL ***",
-        )
+        self.launchButton = LaunchButton(text="*** UNLEASH HELL ***")
         self.launchButton.setMinimumHeight(40)
         self.launchButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.launchButton.clicked.connect(self._onLaunchRequested)
 
-        # Right panel widgets
         self.lostSoulWidget = DoomSoulWidget(
             skull_gif_path="assets/lost_soul.gif",
             animated_background=self.config.animated_background,
@@ -293,10 +282,12 @@ class MainWindow(QMainWindow):
     def setSourcePort(self, sourcePort: str):
         self.sourcePortPathInput.setText(sourcePort)
         self.config.source_port_path = sourcePort
+        self.runtime.config.source_port_path = sourcePort
 
     def setIWad(self, wad: str):
         self.iwadInput.setText(wad)
         self.config.iwad_path = wad
+        self.runtime.config.iwad_path = wad
 
     def addPWads(self, wads: list):
         dialog = self.loadingWindow
@@ -308,10 +299,7 @@ class MainWindow(QMainWindow):
             for i, wad in enumerate(wads):
                 dialog.setValue(i)
                 if not self.pwadList.addWad(wad):
-                    msg = (
-                        f"The wad {wad} has already "
-                        "been added to the wad list."
-                    )
+                    msg = f"The wad {wad} has already been added to the wad list."
                     self.errorDialog.showMessage(msg)
                 QApplication.processEvents()
             dialog.setValue(len(wads))
@@ -336,6 +324,7 @@ class MainWindow(QMainWindow):
         if isIWad:
             self.config.iwad_dir = str(PurePath(filename).parent)
             self.config.iwad_path = filename
+            self.iwadInput.setText(filename)
         else:
             if filename:
                 self.config.pwad_dir = str(PurePath(filename[0]).parent)
@@ -344,28 +333,158 @@ class MainWindow(QMainWindow):
     def saveSourcePortPath(self, filename: str):
         self.config.source_port_dir = str(PurePath(filename).parent)
         self.config.source_port_path = filename
+        self.sourcePortPathInput.setText(filename)
         self.saveConfig()
 
     def getConfig(self):
         return self.config.to_dict()
 
     def saveConfig(self):
-        self.config.source_port_path = self.sourcePortPathInput.text().strip() or "gzdoom"
-        self.config.iwad_path = self.iwadInput.text().strip()
-        self.config.extra_options = self.extraOptionsInput.text().strip()
-        self.config.pwad_paths = [
-            item.data(0, Qt.UserRole) for item in self.pwadList.getItems()
-        ]
-        self.config.animated_background = self.animatedBgAction.isChecked()
-        self.config.performance_mode = self.performanceModeAction.isChecked()
-        self.config.render_profile = "low" if self.config.performance_mode else "high"
-
+        self._synchronize_from_ui()
         try:
-            self.configStore.save(self.config.normalized())
+            self.runtime.config = self.config.normalized()
+            self.runtime.save_config()
             self.statusBar().showMessage("Configuration saved", 2500)
         except Exception as exc:
             self.statusBar().showMessage(f"Failed to save config: {exc}", 4000)
             self.errorDialog.showMessage(f"Failed to save configuration: {exc}")
+
+    def _synchronize_from_ui(self):
+        self.config.source_port_path = self.sourcePortPathInput.text().strip() or "gzdoom"
+        self.config.iwad_path = self.iwadInput.text().strip()
+        self.config.extra_options = self.extraOptionsInput.text().strip()
+        self.config.pwad_paths = [item.data(0, Qt.UserRole) for item in self.pwadList.getItems()]
+        self.config.animated_background = self.animatedBgAction.isChecked()
+        self.config.performance_mode = self.performanceModeAction.isChecked()
+        self.config.render_profile = "low" if self.config.performance_mode else "high"
+        perf_settings.apply_profile(self.config.render_profile)
+        self.runtime.config = self.config
+
+    def _set_launch_busy(self, busy: bool):
+        controls = [
+            self.sourcePortPathInput,
+            self.iwadInput,
+            self.iwadBrowseButton,
+            self.pwadList,
+            self.pwadAddButton,
+            self.pwadRemoveButton,
+            self.pwadUpButton,
+            self.pwadDownButton,
+            self.extraOptionsInput,
+            self.openSourcePortAction,
+            self.openIWadAction,
+            self.openPWadAction,
+            self.animatedBgAction,
+            self.performanceModeAction,
+            self.launchButton,
+        ]
+        for widget in controls:
+            widget.setEnabled(not busy)
+
+    def _onLaunchRequested(self):
+        self._synchronize_from_ui()
+        self.saveConfig()
+
+        cfg = self.config.normalized()
+        preview = self._launch_preview(cfg)
+        self.statusBar().showMessage(preview, 4000)
+        self.logWindow.clear()
+        self.logWindow.show()
+
+        launched = self.launchController.start_launch(cfg)
+        if not launched.started:
+            self._set_launch_busy(False)
+            self.statusBar().showMessage("Launch blocked: fix config errors and try again", 3000)
+            return
+
+    def _launch_preview(self, cfg) -> str:
+        args = build_launch_args(cfg)
+        quoted = " ".join(shlex.quote(arg) for arg in args)
+        return f"Launch: {cfg.source_port_path} {quoted}".strip()
+
+    def _on_launch_state_changed(self, state: str):
+        if state == LaunchOrchestrator.STATE_VALIDATING:
+            self.statusBar().showMessage("Validating launch configuration...")
+        elif state == LaunchOrchestrator.STATE_LAUNCHING:
+            self._set_launch_busy(True)
+            self._last_launch_status["start"] = time.time()
+            self.statusBar().showMessage("Launching...")
+            self.loadingWindow.setRange(0, 0)
+            self.loadingWindow.setValue(0)
+            self.loadingWindow.show()
+            self.logWindow.clear()
+            self.logWindow.show()
+            self.launchButton.set_loading(True)
+        elif state == LaunchOrchestrator.STATE_RUNNING:
+            self.statusBar().showMessage("BFG.py running")
+            self.loadingWindow.hide()
+            self.loadingWindow.setValue(0)
+        elif state == LaunchOrchestrator.STATE_CANCELING:
+            self.statusBar().showMessage("Launch stop requested")
+            self._set_launch_busy(True)
+            self.logWindow.append("Stop requested...")
+        elif state in (LaunchOrchestrator.STATE_FAILED, LaunchOrchestrator.STATE_FINISHED):
+            self.launchButton.set_loading(False)
+            self._set_launch_busy(False)
+            self.loadingWindow.hide()
+            if state == LaunchOrchestrator.STATE_FAILED:
+                self.statusBar().showMessage("Launch failed", 3000)
+            else:
+                self.statusBar().showMessage("Launch finished", 3000)
+        elif state == LaunchOrchestrator.STATE_IDLE:
+            self._set_launch_busy(False)
+            self.launchButton.set_loading(False)
+
+    def _on_launch_output(self, line: str):
+        self.logWindow.append(line)
+
+    def _on_launch_error(self, message: str):
+        self.logWindow.append(f"ERROR: {message}")
+        self.errorDialog.showMessage(message)
+        self.statusBar().showMessage(message, 5000)
+        self.loadingWindow.hide()
+        self.launchButton.set_loading(False)
+        self._set_launch_busy(False)
+
+    def _on_launch_finished(self, exit_code, reason: Optional[str]):
+        self.launchButton.set_loading(False)
+        self._set_launch_busy(False)
+        self.loadingWindow.hide()
+
+        self._last_launch_status["exit_code"] = exit_code
+        self._last_launch_status["failure"] = reason
+
+        self.logWindow.append(f"Process finished with code {exit_code}")
+        if reason:
+            self.logWindow.append(f"Reason: {reason}")
+
+        elapsed = 0.0
+        if self._last_launch_status["start"]:
+            elapsed = time.time() - self._last_launch_status["start"]
+        status = f"Launcher process exited with code {exit_code}"
+        if reason:
+            status = f"Launcher exited ({reason})"
+        if elapsed:
+            status = f"{status} in {elapsed:.1f}s"
+
+        self.statusBar().showMessage(status, 5000)
+        self.saveConfig()
+
+        if exit_code is None:
+            return
+        if exit_code != 0:
+            QMessageBox.warning(
+                self,
+                "Launch finished",
+                f"Source port exited with non-zero code {exit_code}.\nReason: {reason or 'unknown'}",
+            )
+
+    def applyWarningsOrErrors(self):
+        validation = self.config.validate()
+        if validation.errors:
+            self.errorDialog.showMessage("\n".join(validation.errors))
+        if validation.warnings:
+            self.statusBar().showMessage("Warnings: " + "; ".join(validation.warnings), 6000)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -400,6 +519,7 @@ class MainWindow(QMainWindow):
             self.saveConfig()
         except Exception as exc:
             self.errorDialog.showMessage(f"Failed to save config: {exc}")
+
         if self.launchController.is_running():
             self.launchController.stop_launch()
         super().closeEvent(event)
@@ -415,6 +535,7 @@ class MainWindow(QMainWindow):
         enabled = self.animatedBgAction.isChecked()
         self.config.animated_background = enabled
         self.lostSoulWidget.setAnimatedBackground(enabled)
+        self.runtime.config.animated_background = enabled
         self.saveConfig()
 
     def togglePerformanceMode(self):
@@ -427,74 +548,3 @@ class MainWindow(QMainWindow):
     def set_render_profile(self, profile: str):
         self.config.render_profile = "low" if profile == "low" else "high"
         perf_settings.apply_profile(self.config.render_profile)
-
-    def _synchronize_from_ui(self):
-        self.config.source_port_path = self.sourcePortPathInput.text().strip() or "gzdoom"
-        self.config.iwad_path = self.iwadInput.text().strip()
-        self.config.extra_options = self.extraOptionsInput.text().strip()
-        self.config.pwad_paths = [
-            item.data(0, Qt.UserRole) for item in self.pwadList.getItems()
-        ]
-        self.config.animated_background = self.animatedBgAction.isChecked()
-        self.config.performance_mode = self.performanceModeAction.isChecked()
-        self.config.render_profile = "low" if self.config.performance_mode else "high"
-        self.set_render_profile(self.config.render_profile)
-
-    def _onLaunchRequested(self):
-        self._synchronize_from_ui()
-        self.logWindow.clear()
-        self.logWindow.show()
-        launched = self.launchController.start_launch(self.config.normalized())
-        if not launched:
-            self.statusBar().showMessage("Launch blocked: fix config errors and try again", 3000)
-            return
-
-    def _on_launch_state_changed(self, state: str):
-        if state == LaunchController.STATE_STARTING:
-            self.statusBar().showMessage("Launching...")
-            self.launchButton.set_loading(True)
-            self.loadingWindow.setRange(0, 0)
-            self.loadingWindow.setValue(0)
-            self.loadingWindow.show()
-            self.logWindow.clear()
-            self.logWindow.show()
-        elif state == LaunchController.STATE_RUNNING:
-            self.statusBar().showMessage("BFG.py is running")
-            self.loadingWindow.hide()
-            self.loadingWindow.setValue(0)
-        elif state in (LaunchController.STATE_STOPPED, LaunchController.STATE_FAILED):
-            self.launchButton.set_loading(False)
-            self.loadingWindow.hide()
-            if state == LaunchController.STATE_STOPPED:
-                self.statusBar().showMessage("Launch stopped", 3000)
-        elif state == LaunchController.STATE_FINISHED:
-            self.loadingWindow.hide()
-
-    def _on_launch_output(self, line: str):
-        self.logWindow.append(line)
-
-    def _on_launch_error(self, message: str):
-        self.errorDialog.showMessage(message)
-        self.statusBar().showMessage(message, 5000)
-        self.loadingWindow.hide()
-        self.launchButton.set_loading(False)
-
-    def _on_launch_finished(self, exit_code: int):
-        self.launchButton.set_loading(False)
-        self.loadingWindow.hide()
-        self.logWindow.append(f'Process finished with code {exit_code}')
-        self.saveConfig()
-        self.statusBar().showMessage(f"Launcher process exited with code {exit_code}", 5000)
-        if exit_code != 0:
-            QMessageBox.warning(
-                self,
-                "Launch finished",
-                f"Source port exited with non-zero code {exit_code}."
-            )
-
-    def applyWarningsOrErrors(self):
-        validation = self.config.validate()
-        if validation.errors:
-            self.errorDialog.showMessage("\n".join(validation.errors))
-        if validation.warnings:
-            self.statusBar().showMessage("Warnings: " + "; ".join(validation.warnings), 6000)
