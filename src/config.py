@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from src.source_port_discovery import can_auto_detect, find_best_match
+
 
 DEFAULT_CACHE_ENTRIES = 300
 SCHEMA_VERSION = 2
@@ -307,8 +309,15 @@ class LauncherConfig:
             result.is_valid = False
             result.errors.append("No source port configured.")
         elif not _has_executable(source_port):
-            result.is_valid = False
-            result.errors.append(f"Source port not found or not executable: {source_port}")
+            best_match = find_best_match(source_port) if can_auto_detect(source_port) else None
+            if best_match:
+                result.warnings.append(
+                    "Source port not found or not executable: "
+                    f"{source_port}. Discovered installed port: {best_match[1]}"
+                )
+            else:
+                result.is_valid = False
+                result.errors.append(f"Source port not found or not executable: {source_port}")
 
         if self.paths.iwad_path:
             iwad = _normalize_path(self.paths.iwad_path, must_exist=False)

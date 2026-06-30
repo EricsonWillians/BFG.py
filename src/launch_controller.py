@@ -14,6 +14,7 @@ from PyQt5.QtCore import QObject, QProcess, QTimer, QElapsedTimer, pyqtSignal
 
 from src.config import LauncherConfig
 from src.performance import perf_settings
+from src.source_port_discovery import can_auto_detect, discover_source_ports, find_best_match
 
 
 @dataclass
@@ -55,7 +56,11 @@ def validate_launch_target(config: LauncherConfig) -> LaunchValidation:
     return LaunchValidation(result.is_valid, result.errors, result.warnings)
 
 
-def resolve_source_port(command: str) -> Tuple[Optional[str], Optional[str]]:
+def resolve_source_port(
+    command: str,
+    *,
+    discover: bool = True,
+) -> Tuple[Optional[str], Optional[str]]:
     command = str(command).strip()
     if not command:
         return None, "No source port configured."
@@ -71,12 +76,22 @@ def resolve_source_port(command: str) -> Tuple[Optional[str], Optional[str]]:
             return str(candidate), None
         return None, f"Source port is not executable: {command}"
 
+    if discover and can_auto_detect(command):
+        discovery = discover_source_ports()
+        if discovery:
+            return discovery[0].path, None
+
     if os.name == "nt" and not command.lower().endswith(".exe"):
         command = f"{command}.exe"
 
     which = shutil.which(command)
     if which:
         return which, None
+
+    if discover:
+        best_match = find_best_match(command)
+        if best_match:
+            return best_match[1], None
 
     return None, f"Source port not found on PATH: {command}"
 

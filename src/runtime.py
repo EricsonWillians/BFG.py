@@ -113,6 +113,7 @@ class ApplicationRuntime(QObject):
         self.logger = _configure_runtime_logger()
         self.config = LauncherConfig.load(self.options.config_path).normalized()
         self.config = self._apply_cli_overrides(self.config)
+        self._apply_known_source_port_discovery()
         self.config = self.config.normalized()
 
         self.launch_orchestrator = LaunchOrchestrator(self)
@@ -150,6 +151,15 @@ class ApplicationRuntime(QObject):
             config.performance_mode = False
             config.render_profile = "low"
         return config
+
+    def _apply_known_source_port_discovery(self) -> None:
+        source_port = str(self.config.source_port_path).strip()
+        resolved_source, _ = resolve_source_port(source_port, discover=True)
+
+        if resolved_source and resolved_source != source_port:
+            self.config.source_port_path = resolved_source
+            self.config.source_port_dir = str(Path(resolved_source).expanduser().parent)
+            self.log.emit(f"Auto-detected source port: {resolved_source}")
 
     def _log_startup_summary(self) -> None:
         if self._startup_summary_logged:
