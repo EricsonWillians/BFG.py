@@ -1898,7 +1898,6 @@ class WadFinder(QWidget):
                 if checked_map.get(source_id, source.get("enabled", True))
                 else Qt.Unchecked
             )
-            item.setCheckable(True)
             self.sourceOrderList.addItem(item)
             if selected == source_id and selected_found < 0:
                 selected_found = selected_idx
