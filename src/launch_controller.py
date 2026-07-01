@@ -56,6 +56,31 @@ def validate_launch_target(config: LauncherConfig) -> LaunchValidation:
     return LaunchValidation(result.is_valid, result.errors, result.warnings)
 
 
+def _resolve_macos_app_binary(candidate: Path) -> Optional[Path]:
+    if os.name == "nt":
+        return None
+    if not candidate.exists() or not candidate.is_dir() or candidate.suffix.lower() != ".app":
+        return None
+
+    binary_dir = candidate / "Contents" / "MacOS"
+    if not binary_dir.is_dir():
+        return None
+
+    try:
+        binaries = sorted(binary_dir.iterdir())
+    except OSError:
+        return None
+
+    executables = [bin_path for bin_path in binaries if bin_path.is_file() and os.access(str(bin_path), os.X_OK)]
+    if executables:
+        return executables[0]
+
+    for candidate in binaries:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def resolve_source_port(
     command: str,
     *,
@@ -67,22 +92,26 @@ def resolve_source_port(
 
     candidate = Path(command).expanduser()
     if candidate.exists():
-        if os.name == "nt":
-            if candidate.is_file():
+        if candidate.is_file():
+            if os.name == "nt":
                 return str(candidate), None
+            if os.access(str(candidate), os.X_OK):
+                return str(candidate), None
+            return None, f"Source port is not executable: {command}"
+
+        if os.name != "nt" and candidate.suffix.lower() == ".app":
+            bundle_binary = _resolve_macos_app_binary(candidate)
+            if bundle_binary and os.access(str(bundle_binary), os.X_OK):
+                return str(bundle_binary), None
+            if bundle_binary:
+                return None, f"Source port app bundle binary is not executable: {command}"
             return None, f"Source port is not a file: {command}"
 
-        if os.access(str(candidate), os.X_OK):
-            return str(candidate), None
-        return None, f"Source port is not executable: {command}"
+        return None, f"Source port is not a file: {command}"
 
-    if discover and can_auto_detect(command):
-        discovery = discover_source_ports()
-        if discovery:
-            return discovery[0].path, None
-
-    if os.name == "nt" and not command.lower().endswith(".exe"):
-        command = f"{command}.exe"
+    if os.name == "nt":
+        if not command.lower().endswith(".exe"):
+            command = f"{command}.exe"
 
     which = shutil.which(command)
     if which:

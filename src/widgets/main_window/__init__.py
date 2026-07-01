@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import os
 import shlex
 import time
-import sys
 from pathlib import Path, PurePath
 from typing import Optional
 
 from PyQt5.Qt import Qt
-from PyQt5.QtCore import QEvent
+from PyQt5.QtCore import QEvent, QUrl
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -15,9 +16,9 @@ from PyQt5.QtWidgets import (
     QErrorMessage,
     QGroupBox,
     QHBoxLayout,
-    QFileDialog,
     QLineEdit,
     QMainWindow,
+    QFileDialog,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -27,7 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src import const
-from src.launch_controller import LaunchOrchestrator, build_launch_args
+from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.runtime import ApplicationRuntime
 from src.performance import perf_settings
 
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         self.errorDialog = QErrorMessage()
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
+        self._init_wad_finder()
 
         self.createMenu()
         self.addWidgets()
@@ -114,6 +116,23 @@ class MainWindow(QMainWindow):
         self.mainLayout.addWidget(self.leftPanel, 2)
         self.mainLayout.addWidget(self.rightPanel, 1)
 
+    def _init_wad_finder(self):
+        self.wadFinder = WadFinder(
+            self,
+            library_dir=self.config.pwad_dir or None,
+            source_state=[
+                source.to_dict()
+                if hasattr(source, "to_dict")
+                else source
+                for source in self.config.browser_sources
+            ],
+            source_state_changed=self._on_browser_sources_changed,
+            library_dir_changed=self._on_browser_library_dir_changed,
+        )
+        self.wadFinder.addRequested.connect(self._on_browser_add)
+        self.wadFinder.removedRequested.connect(self._on_browser_removed)
+        self.wadFinder.statusChanged.connect(self.statusBar().showMessage)
+
     def addWidgets(self):
         self.config = self.config.normalized()
         self.config.render_profile = self.config.render_profile
@@ -122,17 +141,28 @@ class MainWindow(QMainWindow):
         sourcePortLayout = QVBoxLayout(self.sourcePortGroup)
 
         self.sourcePortPathInput = PathInput()
-        self.sourcePortPathInput.setToolTip('Path to gzdoom or zandronum')
+        self.sourcePortPathInput.setToolTip('Path to source port executable')
+        self.sourcePortPathInput.setPlaceholderText('Double-click or click Browse to choose')
         self.sourcePortPathInput.setText(self.config.source_port_path)
         self.sourcePortPathInput.installEventFilter(self)
 
         self.sourcePortBrowseButton = QPushButton('Browse...')
-        self.sourcePortBrowseButton.setToolTip('Select a source port executable')
-        self.sourcePortBrowseButton.clicked.connect(self.browseSourcePort)
+        self.sourcePortBrowseButton.setToolTip('Open a file browser to select the source port executable')
+        self.sourcePortBrowseButton.clicked.connect(self._browse_source_port)
+
+        self.sourcePortBrowseFolderButton = QPushButton('Browse Folder...')
+        self.sourcePortBrowseFolderButton.setToolTip('Open a folder browser to find a source port executable')
+        self.sourcePortBrowseFolderButton.clicked.connect(self._browse_source_port_directory)
+
+        self.sourcePortFolderButton = QPushButton('Open folder')
+        self.sourcePortFolderButton.setToolTip('Open the source port directory')
+        self.sourcePortFolderButton.clicked.connect(self._reveal_source_port_folder)
 
         sourcePortInputLayout = QHBoxLayout()
         sourcePortInputLayout.addWidget(self.sourcePortPathInput, 1)
         sourcePortInputLayout.addWidget(self.sourcePortBrowseButton, 0)
+        sourcePortInputLayout.addWidget(self.sourcePortBrowseFolderButton, 0)
+        sourcePortInputLayout.addWidget(self.sourcePortFolderButton, 0)
         sourcePortLayout.addLayout(sourcePortInputLayout)
 
         self.iwadGroup = QGroupBox("IWAD (Main Game)")
@@ -157,10 +187,6 @@ class MainWindow(QMainWindow):
         self.modPanel.addRequested.connect(self.openPWadAction._open)
         self.modPanel.modsChanged.connect(self.saveConfig)
         self.modPanel.selectedPathsChanged.connect(self.updatePWadInfo)
-
-        self.wadFinder = WadFinder(self, library_dir=self.config.pwad_dir or None)
-        self.wadFinder.addRequested.connect(self._on_browser_add)
-        self.wadFinder.statusChanged.connect(self.statusBar().showMessage)
 
         self.optionsGroup = QGroupBox("Extra Options")
         optionsLayout = QVBoxLayout(self.optionsGroup)
@@ -198,8 +224,10 @@ class MainWindow(QMainWindow):
             self.setSourcePort,
             self.config,
             self.saveSourcePortPath,
-            browse_handler=self.browseSourcePort,
         )
+        self.openSourcePortFolderAction = QAction("Open Source Port Folder", self)
+        self.openSourcePortFolderAction.setStatusTip("Open the selected source port directory")
+        self.openSourcePortFolderAction.triggered.connect(self._reveal_source_port_folder)
         self.openIWadAction = OpenIWadAction(
             self, self.setIWad, self.config, self.saveWadPath
         )
@@ -222,6 +250,7 @@ class MainWindow(QMainWindow):
         menuBar = self.menuBar()
         fileMenu = menuBar.addMenu('&File')
         fileMenu.addAction(self.openSourcePortAction)
+        fileMenu.addAction(self.openSourcePortFolderAction)
         fileMenu.addAction(self.openIWadAction)
         fileMenu.addAction(self.openPWadAction)
         self.openWadFinderAction = OpenWadFinder(self, self.wadFinder)
@@ -258,7 +287,86 @@ class MainWindow(QMainWindow):
         ):
             self._onLaunchRequested()
             return True
+        if (
+            event.type() == QEvent.MouseButtonDblClick
+            and source is self.sourcePortPathInput
+        ):
+            self._browse_source_port()
+            return True
         return super(MainWindow, self).eventFilter(source, event)
+
+    def _browse_source_port(self):
+        action = getattr(self, "openSourcePortAction", None)
+        if action is not None and hasattr(action, "open"):
+            action.open()
+            return
+
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        start_dir = self.config.source_port_dir or str(Path.home())
+        candidate = Path(start_dir)
+        if not candidate.exists():
+            candidate = Path.home()
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select a source port",
+            str(candidate),
+            "Source port executables (*.exe *.bat *.cmd *.com *.app);;Executable files (*);;All files (*)",
+            options=options,
+        )
+        if not selected:
+            return
+        resolved, failure = resolve_source_port(Path(selected).expanduser(), discover=False)
+        if not resolved:
+            if failure:
+                self.errorDialog.showMessage(failure)
+            else:
+                self.errorDialog.showMessage("The selected source port path is invalid.")
+            return
+        self.saveSourcePortPath(resolved)
+        self.setSourcePort(resolved)
+
+    def _browse_source_port_directory(self):
+        action = getattr(self, "openSourcePortAction", None)
+        if action is not None and hasattr(action, "browse_source_port_directory"):
+            selected = action.browse_source_port_directory(self)
+            if selected is not None:
+                self.saveSourcePortPath(selected)
+                self.setSourcePort(selected)
+            return
+
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        start_dir = self.config.source_port_dir or str(Path.home())
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select source port folder",
+            str(start_dir),
+            options=options,
+        )
+        if not selected_dir:
+            return
+        try:
+            source_files = sorted(
+                (entry for entry in Path(selected_dir).iterdir()),
+                key=lambda path: path.name.lower(),
+            ) if Path(selected_dir).exists() else []
+        except OSError:
+            self.statusBar().showMessage("Could not read selected folder.", 2500)
+            return
+        if not source_files:
+            self.statusBar().showMessage("No files found in selected folder.", 2500)
+            return
+        executable = None
+        for file_path in source_files:
+            if file_path.is_file() and os.access(str(file_path), os.X_OK):
+                executable = file_path
+                break
+        if executable is None:
+            self.statusBar().showMessage("No executable was found in selected folder.", 2500)
+            return
+        self.saveSourcePortPath(str(executable))
+        self.setSourcePort(str(executable))
 
     def setSourcePort(self, sourcePort: str):
         self.sourcePortPathInput.setText(sourcePort)
@@ -269,6 +377,7 @@ class MainWindow(QMainWindow):
         self.iwadInput.setText(wad)
         self.config.iwad_path = wad
         self.runtime.config.iwad_path = wad
+
 
     def addPWads(self, wads: list):
         dialog = self.loadingWindow
@@ -304,6 +413,17 @@ class MainWindow(QMainWindow):
         self.modPanel.addMods(paths)
         self.saveConfig()
 
+    def _on_browser_removed(self, paths: list[str]):
+        if not paths:
+            return
+
+        managed = set(self.modPanel.allPaths())
+        removed = [path for path in paths if path in managed]
+        if not removed:
+            return
+        self.modPanel.removePaths(removed)
+        self.saveConfig()
+
     def center(self):
         qr = self.frameGeometry()
         cp = QDesktopWidget().availableGeometry().center()
@@ -323,30 +443,65 @@ class MainWindow(QMainWindow):
                     self.wadFinder._refresh_local_library()
         self.saveConfig()
 
+    def _on_browser_sources_changed(self, payload: list[dict]):
+        try:
+            self.config.set(
+                "browser_sources",
+                [
+                    {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "base": item.get("base"),
+                        "index": item.get("index", "fullsort.gz"),
+                        "browser": item.get("browser", item.get("base", "")),
+                        "parser": item.get("parser", "fullsort"),
+                        "enabled": bool(item.get("enabled", True)),
+                        "status": item.get("status", "unknown"),
+                        "status_message": item.get("status_message", ""),
+                        "status_checked_at": item.get("status_checked_at", 0.0),
+                    }
+                    for item in payload
+                    if isinstance(item, dict)
+                ],
+            )
+            self.runtime.config.browser_sources = self.config.browser_sources
+            self.saveConfig()
+        except Exception:
+            self.statusBar().showMessage("Failed to sync browser source settings.", 3000)
+
+    def _on_browser_library_dir_changed(self, path: str):
+        normalized = str(Path(path).expanduser())
+        self.config.pwad_dir = normalized
+        self.runtime.config.pwad_dir = normalized
+        try:
+            self.saveConfig()
+        except Exception:
+            self.statusBar().showMessage("Failed to save browser library directory.", 2500)
+
     def saveSourcePortPath(self, filename: str):
-        self.config.source_port_dir = str(PurePath(filename).parent)
-        self.config.source_port_path = filename
-        self.sourcePortPathInput.setText(filename)
+        selected = Path(filename).expanduser().resolve()
+        self.config.source_port_dir = str(selected.parent)
+        self.config.source_port_path = str(selected)
+        self.sourcePortPathInput.setText(str(selected))
+        self.runtime.config.source_port_path = str(selected)
+        self.runtime.config.source_port_dir = str(selected.parent)
         self.saveConfig()
 
-    def browseSourcePort(self):
-        start_dir = self.config.source_port_dir or str(Path.home())
-        file_filter = (
-            "Executable files (*.exe);;All files (*.*)"
-            if sys.platform.startswith("win")
-            else "All files (*)"
-        )
-        options = QFileDialog.Options()
-        options |= QFileDialog.DontUseNativeDialog
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select a source port executable",
-            start_dir,
-            file_filter,
-            options=options,
-        )
-        if filename:
-            self.saveSourcePortPath(filename)
+    def _reveal_source_port_folder(self):
+        raw_path = self.sourcePortPathInput.text().strip()
+        selected = Path(raw_path).expanduser() if raw_path else None
+
+        if selected and selected.is_file():
+            selected = selected.parent
+        elif selected and selected.is_dir():
+            selected = selected
+        elif self.config.source_port_dir:
+            candidate = Path(self.config.source_port_dir).expanduser()
+            selected = candidate if candidate.exists() else Path.home()
+        else:
+            selected = Path.home()
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(selected)))
 
     def getConfig(self):
         return self.config.to_dict()
@@ -376,6 +531,9 @@ class MainWindow(QMainWindow):
         controls = [
             self.sourcePortPathInput,
             self.sourcePortBrowseButton,
+            self.sourcePortBrowseFolderButton,
+            self.sourcePortFolderButton,
+            self.openSourcePortFolderAction,
             self.iwadInput,
             self.iwadBrowseButton,
             self.modPanel,

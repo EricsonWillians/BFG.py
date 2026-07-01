@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -12,7 +13,253 @@ from src.source_port_discovery import can_auto_detect, find_best_match
 
 
 DEFAULT_CACHE_ENTRIES = 300
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+@dataclass
+class BrowserSourceConfig:
+    source_id: str
+    name: str
+    base: str
+    index: str
+    browser: str
+    parser: str = "fullsort"
+    enabled: bool = True
+    status: str = "unknown"
+    status_message: str = ""
+    status_checked_at: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.source_id,
+            "name": self.name,
+            "base": self.base,
+            "index": self.index,
+            "browser": self.browser,
+            "parser": self.parser,
+            "enabled": self.enabled,
+            "status": self.status,
+            "status_message": self.status_message,
+            "status_checked_at": self.status_checked_at,
+        }
+
+
+DEFAULT_BROWSER_SOURCES: List[Dict[str, Any]] = [
+    {
+        "id": "youfailit",
+        "name": "Doomworld / idgames mirror (youfailit)",
+        "base": "https://youfailit.net/pub/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://youfailit.net/pub/idgames",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "cyberd",
+        "name": "Doomworld / idgames mirror (idgames.cyberd.org)",
+        "base": "https://idgames.cyberd.org",
+        "index": "fullsort.gz",
+        "browser": "https://idgames.cyberd.org/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "gamers",
+        "name": "Gamers.org mirror",
+        "base": "https://www.gamers.org/pub/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://www.gamers.org/pub/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "braindrain",
+        "name": "BraindrainLAN mirror",
+        "base": "https://mirror.braindrainlan.nu/pub/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://mirror.braindrainlan.nu/pub/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "fu-berlin",
+        "name": "FU Berlin mirror",
+        "base": "https://ftp.fu-berlin.de/pc/games/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://ftp.fu-berlin.de/pc/games/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "lethe",
+        "name": "Lethe Chinstrap mirror",
+        "base": "https://lethe.chinstrap.org/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://lethe.chinstrap.org/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "lug-mtu",
+        "name": "LUG/MTU mirror",
+        "base": "https://mirrors.lug.mtu.edu/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://mirrors.lug.mtu.edu/idgames",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "doomgate",
+        "name": "Doomgate mirror",
+        "base": "https://doomgate.gamers.org/pub/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://doomgate.gamers.org/pub/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "ftpmirror-infania",
+        "name": "FTP Mirror Infania",
+        "base": "https://ftpmirror.infania.net/pub/idgames",
+        "index": "fullsort.gz",
+        "browser": "https://ftpmirror.infania.net/pub/idgames/",
+        "parser": "fullsort",
+        "enabled": True,
+    },
+    {
+        "id": "doomworld-official",
+        "name": "Doomworld / idgames (official - likely blocked)",
+        "base": "https://www.doomworld.com/idgames",
+        "index": "",
+        "browser": "https://www.doomworld.com/idgames",
+        "parser": "html",
+        "enabled": True,
+    },
+    {
+        "id": "doomworld-api",
+        "name": "Doomworld / idgames API (search)",
+        "base": "https://www.doomworld.com/idgames",
+        "index": "api.php",
+        "browser": "https://www.doomworld.com/idgames",
+        "parser": "idgames_api",
+        "enabled": True,
+    },
+]
+
+
+def _normalize_source_id(raw: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw).strip().lower()).strip("_")
+
+
+def _normalize_browser_parser(raw: str) -> str:
+    parser = str(raw).strip().lower()
+    parser = parser.replace("-", "_").replace(" ", "_")
+    if not parser:
+        return "fullsort"
+
+    parser_aliases = {
+        "text": "text",
+        "txt": "text",
+        "api": "idgames_api",
+        "idgamesapi": "idgames_api",
+        "id_api": "idgames_api",
+        "idgames": "idgames_api",
+        "crawl": "html",
+        "webcrawl": "html",
+        "web_crawl": "html",
+        "crawler": "html",
+        "json": "json",
+        "jsn": "json",
+        "js": "json",
+        "rss": "rss",
+        "xml": "rss",
+        "atom": "rss",
+        "html": "html",
+        "fullsort": "fullsort",
+        "auto": "auto",
+    }
+    if parser in parser_aliases:
+        return parser_aliases[parser]
+    return parser if parser in {"fullsort", "html", "auto", "idgames_api", "json", "rss", "text"} else "fullsort"
+
+
+def _coerce_source_status(raw: Any) -> str:
+    status = str(raw).strip().lower()
+    if not status:
+        return "unknown"
+    return status if status in {"unknown", "checking", "cached", "ok", "unreachable", "error", "disabled"} else "unknown"
+
+
+def _coerce_browser_source_entry(value: Any) -> Optional[BrowserSourceConfig]:
+    if not isinstance(value, dict):
+        return None
+
+    base = str(value.get("base", "")).strip()
+    if base:
+        if not (base.startswith("http://") or base.startswith("https://")):
+            base = f"https://{base}"
+        base = base.rstrip("/")
+
+    name = str(value.get("name", "")).strip() or _normalize_source_id(base) or "custom-source"
+    index = str(value.get("index", "fullsort.gz")).strip() or "fullsort.gz"
+    browser = str(value.get("browser", base)).strip().rstrip("/") or base
+    source_id = _normalize_source_id(str(value.get("id", name)))
+    if not source_id:
+        source_id = _normalize_source_id(base) or _normalize_source_id(name) or "source"
+    return BrowserSourceConfig(
+        source_id=source_id,
+        name=name,
+        base=base,
+        index=index,
+        browser=browser,
+        parser=_normalize_browser_parser(value.get("parser", "fullsort")),
+        enabled=bool(value.get("enabled", True)),
+        status=_coerce_source_status(value.get("status", "unknown")),
+        status_message=str(value.get("status_message", "")).strip(),
+        status_checked_at=_coerce_float(value.get("status_checked_at", 0.0), default=0.0),
+    )
+
+
+def _coerce_browser_sources(raw: Any) -> List[BrowserSourceConfig]:
+    entries = _coerce_list(raw)
+    if not entries:
+        return [_coerce_browser_source_entry(src) for src in DEFAULT_BROWSER_SOURCES if _coerce_browser_source_entry(src) is not None]
+
+    out: List[BrowserSourceConfig] = []
+    seen = set()
+    for payload in entries:
+        cfg = _coerce_browser_source_entry(payload)
+        if not cfg:
+            continue
+        if not cfg.base:
+            continue
+        if cfg.source_id in seen:
+            continue
+        seen.add(cfg.source_id)
+        out.append(cfg)
+
+    if out:
+        return out
+    return [
+        item
+        for item in [
+            _coerce_browser_source_entry(src)
+            for src in DEFAULT_BROWSER_SOURCES
+        ]
+        if item is not None
+    ]
+
+
+def _source_list_to_dict(sources: List[BrowserSourceConfig]) -> List[Dict[str, Any]]:
+    return [item.to_dict() for item in sources]
+
+
+def _default_browser_sources() -> List[BrowserSourceConfig]:
+    out: List[BrowserSourceConfig] = []
+    for item in _coerce_browser_sources(DEFAULT_BROWSER_SOURCES):
+        if item:
+            out.append(item)
+    return out
 
 
 @dataclass
@@ -66,6 +313,7 @@ class LauncherConfig:
     ui: UIConfig = field(default_factory=UIConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     extra_options: str = ""
+    browser_sources: List[BrowserSourceConfig] = field(default_factory=_default_browser_sources)
 
     # Legacy flat-key compatibility map.
     _legacy_keys = {
@@ -78,7 +326,7 @@ class LauncherConfig:
         "pwadDir": "pwad_dir",
         "animatedBackground": "animated_background",
         "performanceMode": "performance_mode",
-        "performanceMode": "performance_mode",
+        "browserSources": "browser_sources",
     }
 
     @property
@@ -238,6 +486,9 @@ class LauncherConfig:
             mod_cache_entries=_coerce_int(raw_perf.get("mod_cache_entries", 500), default=500),
         )
 
+        browser_sources = _coerce_browser_sources(
+            data.get("browser_sources", data.get("browserSources"))
+        )
         return cls(
             schema_version=max(schema_version, SCHEMA_VERSION),
             paths=paths,
@@ -247,6 +498,7 @@ class LauncherConfig:
                 data.get("extra_options", data.get("lastOptions", "")),
                 default="",
             ),
+            browser_sources=browser_sources,
         )
 
     def normalized(self) -> "LauncherConfig":
@@ -257,6 +509,7 @@ class LauncherConfig:
         cfg.paths.iwad_dir = str(_normalize_path(cfg.paths.iwad_dir, must_exist=False))
         cfg.paths.pwad_dir = str(_normalize_path(cfg.paths.pwad_dir, must_exist=False))
         cfg.paths.pwad_paths = _normalize_wad_list(cfg.paths.pwad_paths)
+        cfg.browser_sources = _coerce_browser_sources([entry.to_dict() for entry in cfg.browser_sources])
 
         if cfg.ui.render_profile not in {"high", "low"}:
             cfg.ui.render_profile = "high"
@@ -294,6 +547,7 @@ class LauncherConfig:
             },
             "extra_options": self.extra_options,
             "lastOptions": self.extra_options,
+            "browser_sources": _source_list_to_dict(self.browser_sources),
             "sourcePortDir": self.paths.source_port_dir,
             "iwadDir": self.paths.iwad_dir,
             "pwadDir": self.paths.pwad_dir,
@@ -367,6 +621,8 @@ class LauncherConfig:
         elif key in self._legacy_keys:
             mapped = self._legacy_keys[key]
             self.set(mapped, value)
+        elif key == "browser_sources" or key == "browserSources":
+            self.browser_sources = _coerce_browser_sources(value)
 
 
 class ConfigStore:
@@ -430,6 +686,10 @@ def _make_backups(path: Path, keep: int) -> None:
             pass
 
 
+def _coerce_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _coerce_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -447,6 +707,13 @@ def _coerce_int(value: Any, default: int = 0) -> int:
     try:
         value_int = int(value)
         return value_int
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -491,6 +758,20 @@ def _normalize_command_path(path: str) -> str:
 
     candidate = Path(text).expanduser()
     if candidate.exists():
+        if candidate.is_file():
+            try:
+                return str(candidate.resolve())
+            except (OSError, RuntimeError):
+                return text
+
+        if os.name != "nt" and candidate.suffix.lower() == ".app":
+            bundle_binary = _resolve_macos_app_binary(candidate)
+            if bundle_binary:
+                try:
+                    return str(bundle_binary.resolve())
+                except (OSError, RuntimeError):
+                    return str(bundle_binary)
+
         try:
             return str(candidate.resolve())
         except (OSError, RuntimeError):
@@ -524,6 +805,11 @@ def _has_executable(command: str) -> bool:
     if candidate.exists():
         if os.name == "nt":
             return candidate.is_file()
+        if candidate.suffix.lower() == ".app":
+            bundle_binary = _resolve_macos_app_binary(candidate)
+            if bundle_binary:
+                return os.access(str(bundle_binary), os.X_OK)
+            return False
         return candidate.is_file() and os.access(str(candidate), os.X_OK)
 
     if os.name == "nt":
@@ -534,3 +820,31 @@ def _has_executable(command: str) -> bool:
     if not which:
         return False
     return Path(which).is_file()
+
+
+def _resolve_macos_app_binary(candidate: Path) -> Path | None:
+    if os.name == "nt":
+        return None
+
+    if not candidate.exists() or not candidate.is_dir() or candidate.suffix.lower() != ".app":
+        return None
+
+    binary_dir = candidate / "Contents" / "MacOS"
+    if not binary_dir.is_dir():
+        return None
+
+    try:
+        binaries = sorted(binary_dir.iterdir())
+    except OSError:
+        return None
+
+    executables = [
+        bin_path for bin_path in binaries if bin_path.is_file() and os.access(str(bin_path), os.X_OK)
+    ]
+    if executables:
+        return executables[0]
+
+    for item in binaries:
+        if item.is_file():
+            return item
+    return None

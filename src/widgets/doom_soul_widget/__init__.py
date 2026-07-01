@@ -58,7 +58,9 @@ def generate_hell_tile_array(width, height, seed=None):
         y_slice = slice(max(0, ey - radius), min(height, ey + radius + 1))
         x_slice = slice(max(0, ex - radius), min(width, ex + radius + 1))
 
-        dy, dx = np.mgrid[y_slice, x_slice] - np.array([[ey], [ex]])
+        yy, xx = np.mgrid[y_slice, x_slice]
+        dy = yy - ey
+        dx = xx - ex
         dist = np.sqrt(dx * dx + dy * dy)
         mask = dist <= radius
         glow = (220 - dist * 38).astype(int)
