@@ -21,6 +21,8 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSplitter,
     QSizePolicy,
     QStatusBar,
     QVBoxLayout,
@@ -28,6 +30,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src import const
+from src.iwad_detection import detect_iwad
 from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.runtime import ApplicationRuntime
 from src.performance import perf_settings
@@ -70,8 +73,11 @@ class MainWindow(QMainWindow):
         self.initUi()
 
     def initUi(self):
-        self.setMinimumSize(640, 480)
-        self.resize(const.SCREEN_WIDTH, const.SCREEN_HEIGHT)
+        available = QDesktopWidget().availableGeometry()
+        target_width = min(available.width(), max(const.SCREEN_WIDTH, int(available.width() * 0.88)))
+        target_height = min(available.height(), max(const.SCREEN_HEIGHT, int(available.height() * 0.88)))
+        self.setMinimumSize(960, 680)
+        self.resize(target_width, target_height)
         self.center()
         self.setWindowTitle(const.MAIN_WINDOW_TITLE)
 
@@ -94,27 +100,45 @@ class MainWindow(QMainWindow):
         self.show()
 
     def setupResponsiveLayout(self):
-        self.mainLayout = QHBoxLayout(self.centralWidget)
+        self.mainLayout = QVBoxLayout(self.centralWidget)
         self.mainLayout.setSpacing(12)
         self.mainLayout.setContentsMargins(12, 12, 12, 12)
 
+        self.topConfigPanel = QWidget()
+        self.topConfigPanel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.topConfigLayout = QHBoxLayout(self.topConfigPanel)
+        self.topConfigLayout.setSpacing(12)
+        self.topConfigLayout.setContentsMargins(0, 0, 0, 0)
+
+        self.mainSplitter = QSplitter(Qt.Horizontal)
+        self.mainSplitter.setChildrenCollapsible(False)
+
         self.leftPanel = QWidget()
         self.leftPanel.setMinimumWidth(320)
-        self.leftPanel.setMaximumWidth(600)
         self.leftPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.leftLayout = QVBoxLayout(self.leftPanel)
         self.leftLayout.setSpacing(8)
         self.leftLayout.setContentsMargins(0, 0, 0, 0)
 
+        self.leftScroll = QScrollArea()
+        self.leftScroll.setMinimumWidth(320)
+        self.leftScroll.setWidgetResizable(True)
+        self.leftScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.leftScroll.setWidget(self.leftPanel)
+
         self.rightPanel = QWidget()
-        self.rightPanel.setMinimumWidth(200)
+        self.rightPanel.setMinimumWidth(320)
         self.rightPanel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.rightLayout = QVBoxLayout(self.rightPanel)
         self.rightLayout.setSpacing(12)
         self.rightLayout.setContentsMargins(0, 0, 0, 0)
 
-        self.mainLayout.addWidget(self.leftPanel, 2)
-        self.mainLayout.addWidget(self.rightPanel, 1)
+        self.mainSplitter.addWidget(self.leftScroll)
+        self.mainSplitter.addWidget(self.rightPanel)
+        self.mainSplitter.setStretchFactor(0, 2)
+        self.mainSplitter.setStretchFactor(1, 3)
+        self.mainLayout.addWidget(self.topConfigPanel)
+        self.mainLayout.addWidget(self.mainSplitter, 1)
 
     def _init_wad_finder(self):
         self.wadFinder = WadFinder(
@@ -144,6 +168,7 @@ class MainWindow(QMainWindow):
         self.sourcePortPathInput.setToolTip('Path to source port executable')
         self.sourcePortPathInput.setPlaceholderText('Double-click or click Browse to choose')
         self.sourcePortPathInput.setText(self.config.source_port_path)
+        self.sourcePortPathInput.setCursorPosition(0)
         self.sourcePortPathInput.installEventFilter(self)
 
         self.sourcePortBrowseButton = QPushButton('Browse...')
@@ -158,12 +183,15 @@ class MainWindow(QMainWindow):
         self.sourcePortFolderButton.setToolTip('Open the source port directory')
         self.sourcePortFolderButton.clicked.connect(self._reveal_source_port_folder)
 
-        sourcePortInputLayout = QHBoxLayout()
-        sourcePortInputLayout.addWidget(self.sourcePortPathInput, 1)
-        sourcePortInputLayout.addWidget(self.sourcePortBrowseButton, 0)
-        sourcePortInputLayout.addWidget(self.sourcePortBrowseFolderButton, 0)
-        sourcePortInputLayout.addWidget(self.sourcePortFolderButton, 0)
-        sourcePortLayout.addLayout(sourcePortInputLayout)
+        sourcePortLayout.addWidget(self.sourcePortPathInput)
+
+        sourcePortActionsLayout = QHBoxLayout()
+        sourcePortActionsLayout.setSpacing(8)
+        sourcePortActionsLayout.addWidget(self.sourcePortBrowseButton)
+        sourcePortActionsLayout.addWidget(self.sourcePortBrowseFolderButton)
+        sourcePortActionsLayout.addWidget(self.sourcePortFolderButton)
+        sourcePortActionsLayout.addStretch(1)
+        sourcePortLayout.addLayout(sourcePortActionsLayout)
 
         self.iwadGroup = QGroupBox("IWAD (Main Game)")
         iwadLayout = QVBoxLayout(self.iwadGroup)
@@ -171,6 +199,7 @@ class MainWindow(QMainWindow):
         self.iwadInput = IWadInput()
         self.iwadInput.setToolTip('Main IWAD file')
         self.iwadInput.setText(self.config.iwad_path)
+        self.iwadInput.setCursorPosition(0)
         self.iwadInput.installEventFilter(self)
 
         self.iwadBrowseButton = QPushButton('Browse...')
@@ -206,13 +235,15 @@ class MainWindow(QMainWindow):
             skull_gif_path="assets/lost_soul.gif",
             animated_background=self.config.animated_background,
         )
-        self.lostSoulWidget.setMinimumSize(180, 180)
+        self.lostSoulWidget.setMinimumSize(180, 140)
+        self.lostSoulWidget.setMaximumHeight(160)
         self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.logWindow = LogWindow(self)
         self.loadingWindow = LostSoulWindow(self)
 
         self.updatePWadInfo()
+        self._maybe_auto_detect_iwad(show_status=False)
 
         self.installResponsiveLayout()
         self.set_render_profile(self.config.render_profile)
@@ -266,14 +297,22 @@ class MainWindow(QMainWindow):
         helpMenu.addAction(self.openWadRepository)
 
     def installResponsiveLayout(self):
-        self.leftLayout.addWidget(self.sourcePortGroup)
-        self.leftLayout.addWidget(self.iwadGroup)
+        self.topConfigLayout.addWidget(self.sourcePortGroup, 3)
+        self.topConfigLayout.addWidget(self.iwadGroup, 2)
         self.leftLayout.addWidget(self.modPanel, 1)
         self.leftLayout.addWidget(self.optionsGroup)
         self.leftLayout.addWidget(self.launchButton)
+        self.leftLayout.addStretch(0)
 
-        self.rightLayout.addWidget(self.lostSoulWidget, 1)
-        self.rightLayout.addWidget(self.wadFinder, 1)
+        self.rightSplitter = QSplitter(Qt.Vertical)
+        self.rightSplitter.setChildrenCollapsible(False)
+        self.rightSplitter.addWidget(self.lostSoulWidget)
+        self.rightSplitter.addWidget(self.wadFinder)
+        self.rightSplitter.setStretchFactor(0, 1)
+        self.rightSplitter.setStretchFactor(1, 5)
+        self.rightLayout.addWidget(self.rightSplitter, 1)
+        self.mainSplitter.setSizes([360, max(520, self.width() - 360)])
+        self.rightSplitter.setSizes([150, max(460, self.height() - 220)])
 
     def eventFilter(self, source, event):
         if (
@@ -370,13 +409,19 @@ class MainWindow(QMainWindow):
 
     def setSourcePort(self, sourcePort: str):
         self.sourcePortPathInput.setText(sourcePort)
+        self.sourcePortPathInput.setCursorPosition(0)
         self.config.source_port_path = sourcePort
         self.runtime.config.source_port_path = sourcePort
+        self._maybe_auto_detect_iwad(show_status=True)
 
     def setIWad(self, wad: str):
         self.iwadInput.setText(wad)
+        self.iwadInput.setCursorPosition(0)
         self.config.iwad_path = wad
         self.runtime.config.iwad_path = wad
+        if wad:
+            self.config.iwad_dir = str(Path(wad).expanduser().parent)
+            self.runtime.config.iwad_dir = self.config.iwad_dir
 
 
     def addPWads(self, wads: list):
@@ -483,6 +528,7 @@ class MainWindow(QMainWindow):
         self.config.source_port_dir = str(selected.parent)
         self.config.source_port_path = str(selected)
         self.sourcePortPathInput.setText(str(selected))
+        self.sourcePortPathInput.setCursorPosition(0)
         self.runtime.config.source_port_path = str(selected)
         self.runtime.config.source_port_dir = str(selected.parent)
         self.saveConfig()
@@ -525,7 +571,32 @@ class MainWindow(QMainWindow):
         self.config.performance_mode = self.performanceModeAction.isChecked()
         self.config.render_profile = "low" if self.config.performance_mode else "high"
         perf_settings.apply_profile(self.config.render_profile)
+        self._maybe_auto_detect_iwad(show_status=False)
         self.runtime.config = self.config
+
+    def _maybe_auto_detect_iwad(self, *, show_status: bool) -> bool:
+        current_iwad = self.iwadInput.text().strip() if hasattr(self, "iwadInput") else self.config.iwad_path
+        if current_iwad and Path(current_iwad).expanduser().is_file():
+            return False
+
+        detected = detect_iwad(
+            source_port_path=self.sourcePortPathInput.text().strip() if hasattr(self, "sourcePortPathInput") else self.config.source_port_path,
+            iwad_path=current_iwad,
+            iwad_dir=self.config.iwad_dir,
+            extra_dirs=[self.config.source_port_dir, self.config.pwad_dir],
+        )
+        if not detected:
+            return False
+
+        self.iwadInput.setText(detected.path)
+        self.iwadInput.setCursorPosition(0)
+        self.config.iwad_path = detected.path
+        self.config.iwad_dir = str(Path(detected.path).expanduser().parent)
+        self.runtime.config.iwad_path = detected.path
+        self.runtime.config.iwad_dir = self.config.iwad_dir
+        if show_status:
+            self.statusBar().showMessage(f"Auto-detected IWAD: {detected.game}", 3500)
+        return True
 
     def _set_launch_busy(self, busy: bool):
         controls = [
@@ -678,9 +749,9 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, 'lostSoulWidget'):
             if width < 700 or height < 500:
-                self.lostSoulWidget.setMinimumSize(150, 150)
+                self.lostSoulWidget.setMinimumSize(150, 120)
             else:
-                self.lostSoulWidget.setMinimumSize(180, 180)
+                self.lostSoulWidget.setMinimumSize(180, 140)
 
     def closeEvent(self, event):
         try:

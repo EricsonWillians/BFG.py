@@ -11,6 +11,7 @@ from typing import List, Optional, Union
 from PyQt5.QtCore import QObject, QCoreApplication, QEventLoop, pyqtSignal
 
 from src.config import LauncherConfig
+from src.iwad_detection import detect_iwad
 from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.performance import perf_settings
 
@@ -114,6 +115,7 @@ class ApplicationRuntime(QObject):
         self.config = LauncherConfig.load(self.options.config_path).normalized()
         self.config = self._apply_cli_overrides(self.config)
         self._apply_known_source_port_discovery()
+        self._apply_known_iwad_discovery()
         self.config = self.config.normalized()
 
         self.launch_orchestrator = LaunchOrchestrator(self)
@@ -160,6 +162,25 @@ class ApplicationRuntime(QObject):
             self.config.source_port_path = resolved_source
             self.config.source_port_dir = str(Path(resolved_source).expanduser().parent)
             self.log.emit(f"Auto-detected source port: {resolved_source}")
+
+    def _apply_known_iwad_discovery(self) -> None:
+        current_iwad = str(self.config.iwad_path).strip()
+        current_path = Path(current_iwad).expanduser() if current_iwad else None
+        if current_path and current_path.is_file():
+            return
+
+        detected = detect_iwad(
+            source_port_path=self.config.source_port_path,
+            iwad_path=current_iwad,
+            iwad_dir=self.config.iwad_dir,
+            extra_dirs=[self.config.source_port_dir, self.config.pwad_dir],
+        )
+        if not detected:
+            return
+
+        self.config.iwad_path = detected.path
+        self.config.iwad_dir = str(Path(detected.path).expanduser().parent)
+        self.log.emit(f"Auto-detected IWAD: {detected.game} ({detected.path})")
 
     def _log_startup_summary(self) -> None:
         if self._startup_summary_logged:

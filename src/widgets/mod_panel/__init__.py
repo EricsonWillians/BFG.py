@@ -6,6 +6,7 @@ from typing import List
 from PyQt5.Qt import Qt
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -52,19 +53,19 @@ class ModPanel(QGroupBox):
         self._searchInput.setPlaceholderText("Filter mods by filename or path...")
         self._searchInput.textChanged.connect(self._apply_filter)
         header.addWidget(self._searchInput, 1)
-
         self._countLabel = QLabel("0 mods loaded")
         self._countLabel.setObjectName("modCount")
         header.addWidget(self._countLabel)
         root.addLayout(header)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
-        self.addButton = QPushButton("＋ Add Mods…")
+        toolbar = QGridLayout()
+        toolbar.setHorizontalSpacing(6)
+        toolbar.setVerticalSpacing(6)
+        self.addButton = QPushButton("Add Mod")
         self.addButton.setToolTip("Open file dialog to add .wad/.pk3 files")
         self.addButton.clicked.connect(self.addRequested.emit)
 
-        self.removeButton = QPushButton("− Remove")
+        self.removeButton = QPushButton("Remove")
         self.removeButton.setToolTip("Remove selected mods")
         self.removeButton.clicked.connect(self.removeSelected)
 
@@ -73,21 +74,18 @@ class ModPanel(QGroupBox):
         self.pwadList.itemSelectionChanged.connect(self._handle_selection_change)
         self.pwadList.orderChanged.connect(self._on_model_changed)
 
-        self.moveUpButton = QPushButton("↑")
+        self.moveUpButton = QPushButton("Move Up")
         self.moveUpButton.setToolTip("Move selected mods up in launch order")
-        self.moveUpButton.setMaximumWidth(34)
         self.moveUpButton.clicked.connect(self.pwadList.moveUp)
 
-        self.moveDownButton = QPushButton("↓")
+        self.moveDownButton = QPushButton("Move Down")
         self.moveDownButton.setToolTip("Move selected mods down in launch order")
-        self.moveDownButton.setMaximumWidth(34)
         self.moveDownButton.clicked.connect(self.pwadList.moveDown)
 
-        toolbar.addWidget(self.addButton)
-        toolbar.addWidget(self.removeButton)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.moveUpButton)
-        toolbar.addWidget(self.moveDownButton)
+        toolbar.addWidget(self.addButton, 0, 0)
+        toolbar.addWidget(self.removeButton, 0, 1)
+        toolbar.addWidget(self.moveUpButton, 1, 0)
+        toolbar.addWidget(self.moveDownButton, 1, 1)
         root.addLayout(toolbar)
 
         self.pwadInfo = PWadInfo()

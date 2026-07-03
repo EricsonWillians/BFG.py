@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
-from html import unescape
+from html import escape, unescape
 import re
 import time
 import webbrowser
@@ -20,7 +20,10 @@ from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QFileDialog,
@@ -28,8 +31,10 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QSplitter,
     QMessageBox,
+    QPlainTextEdit,
+    QTabWidget,
+    QProgressBar,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -43,6 +48,27 @@ DEFAULT_EXTENSIONS = (".wad", ".pk3", ".ipk3", ".pk7", ".pke", ".zip")
 INDEX_TTL_SECONDS = 60 * 60 * 6
 DEFAULT_SOURCE_LIMIT = 750
 MAX_CACHED_INDEX_ENTRIES = 5000
+QUERY_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "to",
+    "with",
+}
 SOURCE_STATUS_UNKNOWN = "unknown"
 SOURCE_STATUS_CHECKING = "checking"
 SOURCE_STATUS_CACHED = "cached"
@@ -68,6 +94,9 @@ MIRRORS_DISCOVERY_MAX_PAGES = 280
 MIRRORS_DISCOVERY_TIMEOUT = 25
 SOURCE_PING_TIMEOUT = 8
 IDGAMES_API_TIMEOUT = 25
+IDGAMES_TEXTFILE_TIMEOUT = 14
+IDGAMES_TEXTFILE_MAX_FETCHES = 90
+IDGAMES_TEXTFILE_MIN_TOKENS = 2
 PARSER_ALIASES = {
     "api": "idgames_api",
     "idgames_api": "idgames_api",
@@ -116,10 +145,11 @@ DEFAULT_SOURCES = [
 ]
 
 
-@dataclass(frozen=True)
+@dataclass
 class WadBrowserResult:
     title: str
     description: str
+    metadata_text: str
     source_id: str
     source_name: str
     size_bytes: int
@@ -460,12 +490,21 @@ class _DiscoverSourcesWorker(QRunnable):
 
 
 class _SearchWorker(QRunnable):
-    def __init__(self, token: int, source_id: str, source: Dict[str, str], query: str = ""):
+    def __init__(
+        self,
+        token: int,
+        source_id: str,
+        source: Dict[str, str],
+        query: str = "",
+        seed_results: Optional[List[WadBrowserResult]] = None,
+    ):
         super().__init__()
         self.token = token
         self.source_id = source_id
         self.source = source
         self.query = query.lower().strip()
+        self.seed_results = seed_results
+        self._seen_textfile_urls = set()
         self.signals = _SearchSignals()
 
     @staticmethod
@@ -512,6 +551,260 @@ class _SearchWorker(QRunnable):
         if last_exc:
             raise last_exc
         raise RuntimeError("idgames_api request failed")
+
+    @staticmethod
+    def _is_idgames_source(source: Dict[str, str]) -> bool:
+        base = str(source.get("base", "")).lower()
+        browser = str(source.get("browser", "")).lower()
+        return "idgames" in base or "idgames" in browser
+
+    @staticmethod
+    def _candidate_textfile_urls(source: Dict[str, str], result: WadBrowserResult) -> List[str]:
+        base = str(source.get("base", "")).strip().rstrip("/")
+        if not base:
+            return []
+
+        remote = _normalize_remote_path(result.remote_path)
+        if not remote:
+            return []
+
+        candidates: List[str] = []
+        path = Path(remote)
+
+        primary = urljoin(f"{base}/", str(path.with_suffix(".txt")))
+        candidates.append(primary)
+
+        stem = path.name
+        if stem.startswith("#") and len(stem) > 1:
+            trimmed = path.with_name(stem[1:])
+            candidates.append(urljoin(f"{base}/", str(trimmed.with_suffix(".txt"))))
+            candidates.append(urljoin(f"{base}/", str(trimmed)))
+
+        fallback = str(path)
+        if fallback != fallback.replace(".zip", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".zip", ".txt")))
+        if fallback != fallback.replace(".wad", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".wad", ".txt")))
+        if fallback != fallback.replace(".pk3", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".pk3", ".txt")))
+        if fallback != fallback.replace(".ipk3", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".ipk3", ".txt")))
+        if fallback != fallback.replace(".pk7", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".pk7", ".txt")))
+        if fallback != fallback.replace(".pke", ".txt"):
+            candidates.append(urljoin(f"{base}/", fallback.replace(".pke", ".txt")))
+
+        # Include a browser-side URL variant to allow mirrors with different file layouts.
+        browser = str(result.browser_url or "").strip()
+        if browser and browser.lower().startswith("http"):
+            parsed = urlparse(browser)
+            if parsed.path:
+                path_only = parsed._replace(query="", fragment="").geturl()
+                browser_path = urlparse(path_only).path
+                if browser_path:
+                    candidates.append(urljoin(f"{base}/", str(Path(browser_path).with_suffix(".txt")).lstrip("/")))
+                    candidates.append(path_only)
+
+        deduped: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            deduped.append(candidate)
+        return deduped
+
+    @staticmethod
+    def _parse_textfile_metadata(text: str) -> Dict[str, str]:
+        fields: Dict[str, str] = {}
+        if not text:
+            return fields
+
+        lines = text.replace("\r", "\n").splitlines()
+        description_lines: List[str] = []
+        parsing_description = False
+
+        for line in lines:
+            raw = line.strip()
+            if not raw:
+                if parsing_description:
+                    continue
+                continue
+
+            if re.fullmatch(r"[=*\-]{4,}", raw):
+                if parsing_description and description_lines:
+                    break
+                continue
+
+            if parsing_description:
+                if raw.startswith("*") and ":" in raw:
+                    break
+                if re.match(r"^[A-Za-z][A-Za-z0-9 _/()'\".#!,:-]{1,140}:\s*.+", raw):
+                    break
+                description_lines.append(raw)
+                continue
+
+            match = re.match(
+                r"^([A-Za-z][A-Za-z0-9 _/()'\".#!,:-]{1,140}):\s*(.*)$",
+                raw,
+            )
+            if not match:
+                continue
+
+            key = re.sub(r"\s+", " ", match.group(1).strip()).strip().lower()
+            value = match.group(2).strip()
+            if key == "description":
+                parsing_description = True
+                if value:
+                    description_lines.append(value)
+                continue
+
+            if not value:
+                continue
+
+            fields[key] = value
+
+        if description_lines:
+            fields["description"] = _normalize_metadata_text(*description_lines)
+
+        return fields
+
+    def _enrich_with_text_metadata(
+        self,
+        query: str,
+        results: List[WadBrowserResult],
+        source: Optional[Dict[str, str]] = None,
+    ) -> int:
+        if not query:
+            return 0
+        source = source or self.source
+        if not self._is_idgames_source(source):
+            return 0
+
+        tokens = _tokenize_query(query)
+        if len(tokens) < IDGAMES_TEXTFILE_MIN_TOKENS:
+            return 0
+
+        def score(item: WadBrowserResult) -> int:
+            blob = _result_search_blob(item)
+            return sum(1 for token in tokens if token in blob)
+
+        candidate_items: List[WadBrowserResult] = []
+        for item in results:
+            haystack = _result_search_blob(item)
+            if _query_matches_any(haystack, query):
+                candidate_items.append(item)
+                continue
+            if tokens and any(token in item.title.lower() for token in tokens):
+                candidate_items.append(item)
+                continue
+            if tokens and any(token in item.remote_path.lower() for token in tokens):
+                candidate_items.append(item)
+
+        enriched = 0
+        if not candidate_items:
+            candidate_items = sorted(results, key=lambda item: item.size_bytes, reverse=True)
+
+        candidate_items = sorted(
+            candidate_items,
+            key=lambda item: (
+                -score(item),
+                item.remote_path.lower(),
+                item.size_bytes,
+                item.title.lower(),
+            ),
+        )
+        budget = min(IDGAMES_TEXTFILE_MAX_FETCHES, len(candidate_items))
+        multi_token_query = len(tokens) >= 2
+        deadline = time.time() + (15.0 if multi_token_query else 4.0)
+        attempt_budget = min(budget, 90 if multi_token_query else 12)
+        success_budget = min(budget, 36 if multi_token_query else 12)
+        attempts = 0
+
+        for item in candidate_items:
+            if attempts >= attempt_budget:
+                break
+            if enriched >= success_budget:
+                break
+            if time.time() > deadline:
+                break
+
+            haystack = _result_search_blob(item)
+            if _query_matches(haystack, self.query):
+                continue
+
+            for candidate in self._candidate_textfile_urls(source, item):
+                if candidate in self._seen_textfile_urls:
+                    continue
+
+                self._seen_textfile_urls.add(candidate)
+                try:
+                    attempts += 1
+                    response = requests.get(
+                        candidate,
+                        headers={"User-Agent": UA},
+                        timeout=(1.5, 3.0),
+                    )
+                    if response.status_code >= 400:
+                        continue
+
+                    payload = self._parse_textfile_metadata(response.content.decode("utf-8", errors="ignore"))
+                    if not payload:
+                        continue
+
+                    description = payload.pop("description", "")
+                    if description:
+                        item.description = _normalize_metadata_text(item.description, description)
+                    if payload:
+                        item.metadata_text = _normalize_metadata_text(item.metadata_text, description, *payload.values())
+                        item.metadata_text = item.metadata_text[:1800]
+                    enriched += 1
+                    break
+                except Exception:
+                    continue
+
+        return enriched
+
+    @staticmethod
+    def _iter_idgames_fallback_sources(source: Dict[str, str]) -> List[Dict[str, str]]:
+        fallback_sources: List[Dict[str, str]] = []
+        primary_base = str(source.get("base", "")).strip().rstrip("/").lower()
+        if not primary_base:
+            return fallback_sources
+
+        for entry in DEFAULT_SOURCES:
+            base = str(entry.get("base", "")).strip().rstrip("/")
+            if not base:
+                continue
+            if base.lower() == primary_base:
+                continue
+            if "idgames" not in base.lower():
+                continue
+            if entry.get("parser") not in {"fullsort", "html", "auto", "idgames_api"}:
+                continue
+            fallback_sources.append(
+                {
+                    "base": base,
+                    "browser": str(entry.get("browser", base)).strip(),
+                    "index": str(entry.get("index", "")).strip(),
+                    "name": str(entry.get("name", base)),
+                    "id": str(entry.get("id", "")),
+                    "parser": str(entry.get("parser", "fullsort")).strip(),
+                }
+            )
+
+        return fallback_sources
+
+    def _preferred_text_metadata_source(self) -> Dict[str, str]:
+        primary_base = str(self.source.get("base", "")).strip().rstrip("/")
+        if primary_base and "doomworld.com" not in primary_base.lower():
+            return self.source
+
+        for candidate in self._iter_idgames_fallback_sources(self.source):
+            candidate_base = str(candidate.get("base", "")).strip().rstrip("/")
+            if candidate_base and "doomworld.com" not in candidate_base.lower():
+                return candidate
+        return self.source
 
     @staticmethod
     def _coerce_int(value: Any) -> int:
@@ -567,7 +860,11 @@ class _SearchWorker(QRunnable):
 
     @staticmethod
     def _parse_idgames_api(
-        source: Dict[str, str], text: str, query: str, allow_empty_query: bool = False
+        source: Dict[str, str],
+        text: str,
+        query: str,
+        allow_empty_query: bool = False,
+        filter_by_query: bool = True,
     ) -> List[WadBrowserResult]:
         query = query.lower().strip()
         if not query and not allow_empty_query:
@@ -604,8 +901,9 @@ class _SearchWorker(QRunnable):
             if remote_path in seen:
                 continue
 
-            haystack = f"{filename} {path} {str(item.get('title', ''))} {str(item.get('description', ''))} {str(item.get('author', ''))}".lower()
-            if query and query not in haystack:
+            metadata_text = _metadata_from_mapping(item)
+            haystack = _normalize_metadata_text(filename, path, metadata_text).lower()
+            if filter_by_query and query and not _query_matches_any(haystack, query):
                 continue
 
             size = 0
@@ -654,6 +952,7 @@ class _SearchWorker(QRunnable):
                 WadBrowserResult(
                     title=filename,
                     description=description,
+                    metadata_text=metadata_text,
                     source_id=source.get("id", ""),
                     source_name=source.get("name", source.get("base", "")),
                     size_bytes=size,
@@ -680,6 +979,7 @@ class _SearchWorker(QRunnable):
                 WadBrowserResult(
                     title=Path(normalized).name,
                     description="",
+                    metadata_text="",
                     source_id=source.get("id", ""),
                     source_name=source.get("name", source.get("base", "")),
                     size_bytes=0,
@@ -764,8 +1064,14 @@ class _SearchWorker(QRunnable):
             if not remote or not _looks_like_mod_file(remote):
                 continue
 
-            haystack = f"{title} {remote} {description}".lower()
-            if query and query not in haystack:
+            metadata_text = _normalize_metadata_text(
+                title,
+                description,
+                _pick_text(item, ["author", f"{namespace}author"]),
+                [category.text.strip() for category in item.findall("category") if (category.text or "").strip()],
+            )
+            haystack = _normalize_metadata_text(remote, metadata_text).lower()
+            if query and not _query_matches_any(haystack, query):
                 continue
 
             browser_url = _pick_text(item, ["link", f"{namespace}link", "guid", "id"])
@@ -792,6 +1098,7 @@ class _SearchWorker(QRunnable):
                 WadBrowserResult(
                     title=title or Path(remote).name,
                     description=description,
+                    metadata_text=metadata_text,
                     source_id=source.get("id", ""),
                     source_name=source.get("name", source.get("base", "")),
                     size_bytes=size,
@@ -871,7 +1178,7 @@ class _SearchWorker(QRunnable):
                 continue
             if query:
                 search_blob = f"{rel} {label}".lower().replace("_", " ")
-                if query not in search_blob:
+                if not _query_matches_any(search_blob, query):
                     continue
             seen.add(rel)
             found.append((0, rel, label[:140]))
@@ -927,9 +1234,7 @@ class _SearchWorker(QRunnable):
 
                 if not _looks_like_mod_file(rel):
                     continue
-                if query and query not in rel.lower():
-                    if query not in label.lower():
-                        continue
+                if query and not _query_matches_any(f"{rel} {label}", query):
                     continue
                 discovered.add(rel)
                 results.append((0, rel, label[:140]))
@@ -945,6 +1250,8 @@ class _SearchWorker(QRunnable):
     @staticmethod
     def _crawl_start_path(start: str) -> str:
         crawl_start = str(start or "").strip()
+        if crawl_start.lower().endswith(".php"):
+            return ""
         if crawl_start.lower().endswith((".gz", ".zip", ".txt", ".tgz")):
             return ""
         return crawl_start
@@ -1085,7 +1392,7 @@ class _SearchWorker(QRunnable):
                 continue
 
             haystack = f"{raw} {tail} {candidate}".lower()
-            if query and query not in haystack:
+            if query and not _query_matches_any(haystack, query):
                 continue
 
             if remote.startswith(base):
@@ -1106,17 +1413,88 @@ class _SearchWorker(QRunnable):
             if not start:
                 start = "fullsort.gz"
             base = self.source["base"].rstrip("/")
+            source = self.source
             query = self.query
 
-            if parser == "auto":
-                raw_items = []
-                if query:
-                    try:
-                        raw_items = self._parse_idgames_api(self.source, self._fetch_api(base, query), query)
-                    except Exception:
-                        raw_items = []
+            if self.seed_results is not None:
+                parsed = [WadBrowserResult(**vars(item)) for item in self.seed_results]
+                self._enrich_with_text_metadata(query, parsed, source=source)
+                self.signals.finished.emit(self.token, self.source_id, parsed)
+                return
 
-                if not raw_items:
+            raw_items: List[Any] = []
+            seen_remote_paths = set()
+
+            def _collect_raw(items: Any) -> None:
+                for item in items or []:
+                    if isinstance(item, WadBrowserResult):
+                        remote = item.remote_path
+                    elif isinstance(item, (list, tuple)):
+                        if len(item) < 2:
+                            continue
+                        remote = item[1]
+                    else:
+                        continue
+
+                    remote = _SearchWorker._normalize_api_path(str(remote))
+                    if not remote or remote in seen_remote_paths:
+                        continue
+                    seen_remote_paths.add(remote)
+                    raw_items.append(item)
+
+            if parser == "auto":
+                if query:
+                    candidate_sources = [self.source]
+                    if self._is_idgames_source(self.source):
+                        candidate_sources.extend(self._iter_idgames_fallback_sources(self.source))
+
+                    if self._is_idgames_source(self.source):
+                        for candidate in candidate_sources:
+                            source = candidate
+                            base = str(candidate.get("base", "")).rstrip("/")
+                            if not base:
+                                continue
+                            try:
+                                text = self._fetch_index(f"{base}/fullsort.gz")
+                                _collect_raw(self._parse_fullsort(text))
+                            except Exception:
+                                pass
+
+                        if not raw_items:
+                            for candidate in candidate_sources:
+                                source = candidate
+                                base = str(candidate.get("base", "")).rstrip("/")
+                                if not base:
+                                    continue
+                                try:
+                                    text = self._fetch_index(f"{base}/{start}")
+                                    _collect_raw(self._parse_fullsort(text))
+                                    if not raw_items:
+                                        _collect_raw(self._parse_json(candidate, text, ""))
+                                    if not raw_items:
+                                        _collect_raw(self._parse_rss(candidate, text, ""))
+                                except Exception:
+                                    pass
+
+                        if not raw_items:
+                            for candidate in candidate_sources:
+                                source = candidate
+                                crawl_start = self._crawl_start_path(start)
+                                _collect_raw(self._crawl_html(candidate, crawl_start, ""))
+
+                    else:
+                        try:
+                            text = self._fetch_index(f"{base}/{start}")
+                            raw_items = self._parse_fullsort(text)
+                            if not raw_items:
+                                raw_items = self._parse_json(self.source, text, "")
+                            if not raw_items:
+                                raw_items = self._parse_rss(self.source, text, "")
+                        except Exception:
+                            crawl_start = self._crawl_start_path(start)
+                            raw_items = self._crawl_html(self.source, crawl_start, "")
+
+                else:
                     try:
                         text = self._fetch_index(f"{base}/{start}")
                         raw_items = self._parse_fullsort(text)
@@ -1126,70 +1504,178 @@ class _SearchWorker(QRunnable):
                             raw_items = self._parse_rss(self.source, text, query)
                     except Exception:
                         crawl_start = self._crawl_start_path(start)
-                        raw_items = self._crawl_html(self.source, crawl_start, query)
+                        raw_items = self._crawl_html(self.source, crawl_start, "")
             elif parser == "idgames_api":
                 if query:
-                    try:
-                        raw_items = self._parse_idgames_api(self.source, self._fetch_api(base, query), query)
-                        if not raw_items:
-                            raise RuntimeError("idgames_api returned no results")
-                    except Exception:
-                        crawl_start = self._crawl_start_path(start)
-                        raw_items = self._crawl_html(self.source, crawl_start, query)
+                    candidate_sources = [self.source] + self._iter_idgames_fallback_sources(self.source)
+                    if not raw_items:
+                        for candidate in candidate_sources:
+                            source = candidate
+                            base = str(candidate.get("base", "")).rstrip("/")
+                            try:
+                                text = self._fetch_index(f"{base}/fullsort.gz")
+                                _collect_raw(self._parse_fullsort(text))
+                            except Exception:
+                                pass
+
+                    if not raw_items:
+                        for candidate in candidate_sources:
+                            source = candidate
+                            base = str(candidate.get("base", "")).rstrip("/")
+                            try:
+                                _collect_raw(
+                                    self._parse_idgames_api(
+                                        candidate,
+                                        self._fetch_api(base, query),
+                                        query,
+                                        allow_empty_query=False,
+                                        filter_by_query=False,
+                                    )
+                                )
+                            except Exception:
+                                pass
+
+                    if not raw_items:
+                        for candidate in candidate_sources:
+                            source = candidate
+                            crawl_start = self._crawl_start_path(start)
+                            _collect_raw(self._crawl_html(candidate, crawl_start, ""))
                 else:
-                    text = self._fetch_index(f"{base}/{start}")
-                    raw_items = self._parse_fullsort(text)
+                    candidate_sources = [self.source] + self._iter_idgames_fallback_sources(self.source)
+                    text = ""
+                    for candidate in candidate_sources:
+                        source = candidate
+                        base = str(candidate.get("base", "")).rstrip("/")
+                        try:
+                            text = self._fetch_index(f"{base}/fullsort.gz")
+                            _collect_raw(self._parse_fullsort(text))
+                        except Exception:
+                            pass
+                    if not text:
+                        text = ""
+
                     if not raw_items:
-                        raw_items = self._parse_json(self.source, text, query)
+                        for candidate in candidate_sources:
+                            source = candidate
+                            base = str(candidate.get("base", "")).rstrip("/")
+                            try:
+                                text = self._fetch_index(f"{base}/{start}")
+                                _collect_raw(self._parse_fullsort(text))
+                                if not raw_items:
+                                    _collect_raw(self._parse_json(candidate, text, ""))
+                                if not raw_items:
+                                    _collect_raw(self._parse_rss(candidate, text, ""))
+                            except Exception:
+                                pass
                     if not raw_items:
-                        raw_items = self._parse_rss(self.source, text, query)
-                    if not raw_items:
-                        crawl_start = self._crawl_start_path(start)
-                        raw_items = self._crawl_html(self.source, crawl_start, query)
+                        for candidate in candidate_sources:
+                            source = candidate
+                            crawl_start = self._crawl_start_path(start)
+                            _collect_raw(self._crawl_html(candidate, crawl_start, ""))
             elif parser == "json":
                 text = self._fetch_index(f"{base}/{start}")
-                raw_items = self._parse_json(self.source, text, query)
+                raw_items = self._parse_json(self.source, text, "")
                 if not raw_items and query:
                     try:
-                        raw_items = self._parse_idgames_api(self.source, self._fetch_api(base, query), query)
+                        raw_items = self._parse_idgames_api(
+                            self.source,
+                            self._fetch_api(base, query),
+                            query,
+                            allow_empty_query=False,
+                            filter_by_query=False,
+                        )
                     except Exception:
                         crawl_start = self._crawl_start_path(start)
-                        raw_items = self._crawl_html(self.source, crawl_start, query)
+                        raw_items = self._crawl_html(self.source, crawl_start, "")
                 if not raw_items:
                     crawl_start = self._crawl_start_path(start)
-                    raw_items = self._crawl_html(self.source, crawl_start, query)
+                    raw_items = self._crawl_html(self.source, crawl_start, "")
             elif parser == "html":
-                crawl_start = self._crawl_start_path(start)
-                raw_items = self._crawl_html(self.source, crawl_start, query)
+                candidate_sources = [self.source]
+                if self._is_idgames_source(self.source):
+                    candidate_sources.extend(self._iter_idgames_fallback_sources(self.source))
+                for candidate in candidate_sources:
+                    source = candidate
+                    base = str(candidate.get("base", "")).rstrip("/")
+                    if not base:
+                        continue
+                    if self._is_idgames_source(candidate):
+                        try:
+                            text = self._fetch_index(f"{base}/fullsort.gz")
+                            _collect_raw(self._parse_fullsort(text))
+                        except Exception:
+                            pass
+
+                if not raw_items:
+                    for candidate in candidate_sources:
+                        source = candidate
+                        crawl_start = self._crawl_start_path(str(candidate.get("index", start)))
+                        _collect_raw(self._crawl_html(candidate, crawl_start, ""))
             elif parser == "rss":
                 text = self._fetch_index(f"{base}/{start}")
-                raw_items = self._parse_rss(self.source, text, query)
+                raw_items = self._parse_rss(self.source, text, "")
                 if not raw_items:
                     crawl_start = self._crawl_start_path(start)
-                    raw_items = self._crawl_html(self.source, crawl_start, query)
+                    raw_items = self._crawl_html(self.source, crawl_start, "")
             elif parser == "text":
                 index_url = urljoin(base + "/", start)
                 text = self._fetch_index(index_url)
-                raw_items = self._parse_text(text, self.source, query)
+                raw_items = self._parse_text(text, self.source, "")
                 if not raw_items:
                     crawl_start = self._crawl_start_path(start)
-                    raw_items = self._crawl_html(self.source, crawl_start, query)
+                    raw_items = self._crawl_html(self.source, crawl_start, "")
             else:
-                index_url = urljoin(base + "/", start)
-                try:
-                    text = self._fetch_index(index_url)
-                    raw_items = self._parse_fullsort(text)
-                    if not raw_items:
-                        raw_items = self._parse_json(self.source, text, query)
-                    if not raw_items:
-                        raw_items = self._parse_rss(self.source, text, query)
-                except Exception:
+                sources = [self.source]
+                if parser == "fullsort" and self._is_idgames_source(self.source):
+                    sources.extend(self._iter_idgames_fallback_sources(self.source))
+                aggregate_fullsort = parser == "fullsort" and bool(self.query)
+
+                for candidate in sources:
+                    candidate_base = str(candidate.get("base", "")).rstrip("/")
+                    if not candidate_base:
+                        continue
+                    candidate_index = str(candidate.get("index", "")).strip() or start
+                    if not candidate_index:
+                        continue
+                    index_url = urljoin(candidate_base + "/", candidate_index)
+                    try:
+                        text = self._fetch_index(index_url)
+                        parsed = self._parse_fullsort(text)
+                        if parsed:
+                            if aggregate_fullsort:
+                                _collect_raw(parsed)
+                            else:
+                                raw_items[:] = parsed
+                                break
+                            continue
+
+                        parsed = self._parse_json(candidate, text, "")
+                        if parsed:
+                            if aggregate_fullsort:
+                                _collect_raw(parsed)
+                                continue
+                            raw_items[:] = parsed
+                            break
+
+                        parsed = self._parse_rss(candidate, text, "")
+                        if parsed:
+                            if aggregate_fullsort:
+                                _collect_raw(parsed)
+                                continue
+                            raw_items[:] = parsed
+                            break
+                        if raw_items and not aggregate_fullsort:
+                            break
+                    except Exception:
+                        continue
+
+                if not raw_items:
                     crawl_start = self._crawl_start_path(start)
-                    raw_items = self._crawl_html(self.source, crawl_start, query)
+                    raw_items = self._crawl_html(self.source, crawl_start, "")
 
             parsed: List[WadBrowserResult] = []
             for item in raw_items:
-                if parser in {"idgames_api", "json", "rss"} and isinstance(item, WadBrowserResult):
+                if isinstance(item, WadBrowserResult):
                     parsed.append(item)
                     continue
 
@@ -1200,14 +1686,18 @@ class _SearchWorker(QRunnable):
                     WadBrowserResult(
                         title=Path(path).name,
                         description=description,
+                        metadata_text=description,
                         source_id=self.source_id,
-                        source_name=self.source["name"],
+                        source_name=source.get("name", source.get("base", "")),
                         size_bytes=size,
                         remote_path=path,
-                        download_url=urljoin(self.source["base"].rstrip("/") + "/", path),
-                        browser_url=urljoin(self.source["browser"].rstrip("/") + "/", path),
+                        download_url=urljoin(source.get("base", "").rstrip("/") + "/", path),
+                        browser_url=urljoin(source.get("browser", source.get("base", "")).rstrip("/") + "/", path),
                     )
                 )
+
+            enrichment_source = self._preferred_text_metadata_source()
+            self._enrich_with_text_metadata(query, parsed, source=enrichment_source)
             self.signals.finished.emit(self.token, self.source_id, parsed)
         except Exception as exc:  # pragma: no cover - network path
             self.signals.failed.emit(self.token, self.source_id, str(exc))
@@ -1284,6 +1774,148 @@ def _normalize_source_id(raw: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_")
 
 
+def _normalize_metadata_text(*parts: Any) -> str:
+    tokens: List[str] = []
+    seen = set()
+    for part in parts:
+        if part is None:
+            continue
+        if isinstance(part, (list, tuple, set)):
+            values = part
+        else:
+            values = [part]
+        for value in values:
+            text = re.sub(r"\s+", " ", str(value or "").strip())
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            tokens.append(text)
+    return " | ".join(tokens)
+
+
+def _search_tokens_from_text(raw: str) -> set[str]:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", " ", str(raw or "").lower())
+    tokens: set[str] = set()
+    for token in normalized.split():
+        if not token:
+            continue
+        tokens.add(token)
+        for chunk in re.findall(r"[a-z]+|\d+", token):
+            if len(chunk) >= 2:
+                tokens.add(chunk)
+    return tokens
+
+
+def _query_token_in_haystack(query_token: str, haystack: str, search_tokens: set[str]) -> bool:
+    if not query_token:
+        return False
+    if query_token in haystack:
+        return True
+    return _query_token_hit(query_token, search_tokens, haystack)
+
+
+def _query_token_hit(query_token: str, search_tokens: set[str], haystack: str) -> bool:
+    if not query_token:
+        return False
+    if query_token in search_tokens:
+        return True
+
+    for token in search_tokens:
+        if query_token in token:
+            return True
+        if token in query_token:
+            return True
+
+    # Mixed alphanumeric filenames can still match broad query terms (e.g. blood -> bloodr).
+    for chunk in re.findall(r"[a-z]+|\d+", query_token):
+        if len(chunk) < 3:
+            continue
+        if chunk in search_tokens:
+            return True
+        for token in search_tokens:
+            if chunk in token:
+                return True
+    return False
+
+
+def _tokenize_query(query: str) -> List[str]:
+    text = re.sub(r"[^0-9a-zA-Z]+", " ", str(query or "").lower())
+    return [token for token in text.split() if token and token not in QUERY_STOP_WORDS]
+
+
+def _query_matches(haystack: str, query: str) -> bool:
+    normalized = str(haystack or "").lower()
+    normalized_query = str(query or "").strip().lower()
+    if not normalized_query:
+        return True
+    if normalized_query in normalized:
+        return True
+    tokens = _tokenize_query(normalized_query)
+    if not tokens:
+        return False
+    haystack_tokens = _search_tokens_from_text(normalized)
+    return all(_query_token_in_haystack(token, normalized, haystack_tokens) for token in tokens)
+
+
+def _query_matches_any(haystack: str, query: str) -> bool:
+    normalized = str(haystack or "").lower()
+    normalized_query = str(query or "").strip().lower()
+    if not normalized_query:
+        return True
+    if normalized_query in normalized:
+        return True
+    tokens = _tokenize_query(normalized_query)
+    if not tokens:
+        return False
+    haystack_tokens = _search_tokens_from_text(normalized)
+    return any(_query_token_in_haystack(token, normalized, haystack_tokens) for token in tokens)
+
+
+def _metadata_from_mapping(payload: Dict[str, Any]) -> str:
+    preferred_keys = (
+        "title",
+        "name",
+        "filename",
+        "description",
+        "desc",
+        "summary",
+        "author",
+        "credits",
+        "textfile",
+        "theme",
+        "genre",
+        "keywords",
+        "tags",
+        "dir",
+        "directory",
+        "path",
+        "id",
+    )
+    collected: List[Any] = []
+    for key in preferred_keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, (str, int, float)):
+            collected.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            collected.extend([item for item in value if isinstance(item, (str, int, float))])
+    return _normalize_metadata_text(*collected)
+
+
+def _result_search_blob(result: WadBrowserResult) -> str:
+    return _normalize_metadata_text(
+        result.title,
+        result.remote_path,
+        result.description,
+        result.metadata_text,
+        result.source_name,
+    ).lower()
+
+
 def _safe_library_name(path: str, source_id: str, target_dir: Path) -> Path:
     file_name = os.path.basename(path)
     if not file_name:
@@ -1335,6 +1967,18 @@ def _short_age(seconds: float) -> str:
     return f"{int(seconds / day)}d ago"
 
 
+def _summarize_text(text: str, limit: int = 120) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip())
+    if not normalized:
+        return "No description available."
+    if len(normalized) <= limit:
+        return normalized
+    clipped = normalized[: max(0, limit - 3)].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    return f"{clipped}..."
+
+
 class WadFinder(QWidget):
     addRequested = pyqtSignal(list)
     removedRequested = pyqtSignal(list)
@@ -1373,6 +2017,7 @@ class WadFinder(QWidget):
         self._search_sessions: Dict[int, Dict[str, Any]] = {}
         self._discover_session: Optional[int] = None
         self._download_sessions: Dict[int, Dict[str, Any]] = {}
+        self._active_search_workers: set = set()
         self._index_cache: Dict[str, _IndexCacheEntry] = {}
         self._rendered_results: List[WadBrowserResult] = []
         self._failed_downloads: List[WadBrowserResult] = []
@@ -1468,12 +2113,12 @@ class WadFinder(QWidget):
         # Search controls.
         searchRow = QHBoxLayout()
         self.sourceCombo = QComboBox()
-        self.sourceCombo.setMinimumWidth(220)
+        self.sourceCombo.setMinimumWidth(180)
         self.sourceCombo.currentIndexChanged.connect(self._on_search_source_changed)
         self._refresh_source_combo()
 
         self.searchInput = QLineEdit()
-        self.searchInput.setPlaceholderText("Search by filename, map, author, or mod name")
+        self.searchInput.setPlaceholderText("Search by filename, theme, description, author, or mod name")
         self.searchInput.returnPressed.connect(self._on_search)
 
         self.searchButton = QPushButton("Search")
@@ -1486,11 +2131,7 @@ class WadFinder(QWidget):
         searchRow.addWidget(self.clearSearchButton)
         root.addLayout(searchRow)
 
-        # Source management for priority and optional disable.
-        sourceHeader = QLabel("Sources & priority")
-        sourceHeader.setStyleSheet("font-weight: 600;")
-        root.addWidget(sourceHeader)
-
+        self.browserTabs = QTabWidget()
         self.sourceOrderList = _SourcePriorityList()
         self.sourceOrderList.setSelectionMode(QAbstractItemView.SingleSelection)
         self.sourceOrderList.itemSelectionChanged.connect(self._on_selection_changed)
@@ -1500,9 +2141,12 @@ class WadFinder(QWidget):
         self.sourceOrderList.setAcceptDrops(True)
         self.sourceOrderList.setDropIndicatorShown(True)
         self.sourceOrderList.setDefaultDropAction(Qt.MoveAction)
+        self.sourceOrderList.setMinimumHeight(180)
         self._rebuild_source_list()
 
-        sourceButtons = QHBoxLayout()
+        sourceButtons = QGridLayout()
+        sourceButtons.setHorizontalSpacing(8)
+        sourceButtons.setVerticalSpacing(8)
         self.sourceUpButton = QPushButton("Move Up")
         self.sourceUpButton.clicked.connect(lambda: self._reorder_source(-1))
         self.sourceDownButton = QPushButton("Move Down")
@@ -1523,15 +2167,15 @@ class WadFinder(QWidget):
         self.sourcePurgeButton.setToolTip("Remove user/discovered sources that are unavailable")
         self.sourcePurgeButton.clicked.connect(self._purge_unavailable_sources)
 
-        sourceButtons.addWidget(self.sourceUpButton)
-        sourceButtons.addWidget(self.sourceDownButton)
-        sourceButtons.addWidget(self.sourceTopButton)
-        sourceButtons.addWidget(self.sourceBottomButton)
-        sourceButtons.addWidget(self.sourceToggleButton)
-        sourceButtons.addWidget(self.sourceEnableAllButton)
-        sourceButtons.addWidget(self.sourceDisableAllButton)
-        sourceButtons.addWidget(self.sourcePurgeButton)
-        sourceButtons.addWidget(self.sourceRemoveButton)
+        sourceButtons.addWidget(self.sourceUpButton, 0, 0)
+        sourceButtons.addWidget(self.sourceDownButton, 0, 1)
+        sourceButtons.addWidget(self.sourceTopButton, 0, 2)
+        sourceButtons.addWidget(self.sourceBottomButton, 0, 3)
+        sourceButtons.addWidget(self.sourceToggleButton, 0, 4)
+        sourceButtons.addWidget(self.sourceEnableAllButton, 1, 0)
+        sourceButtons.addWidget(self.sourceDisableAllButton, 1, 1)
+        sourceButtons.addWidget(self.sourcePurgeButton, 1, 2)
+        sourceButtons.addWidget(self.sourceRemoveButton, 1, 3)
 
         discoverRow = QHBoxLayout()
         self.discoverSeedInput = QLineEdit()
@@ -1548,7 +2192,9 @@ class WadFinder(QWidget):
         discoverRow.addWidget(self.discoverSourcesButton)
         discoverRow.addWidget(self.discoverClearDiscoveredButton)
 
-        sourceAddRow = QHBoxLayout()
+        sourceAddRow = QGridLayout()
+        sourceAddRow.setHorizontalSpacing(8)
+        sourceAddRow.setVerticalSpacing(8)
         self.customSourceInput = QLineEdit()
         self.customSourceInput.setPlaceholderText(
             "Add source(s): URL | Name | index | parser. One per line."
@@ -1561,10 +2207,10 @@ class WadFinder(QWidget):
         self.customSourcePresetButton = QPushButton("Add Built-in Sources")
         self.customSourcePresetButton.clicked.connect(self._add_builtin_sources)
 
-        sourceAddRow.addWidget(self.customSourceInput, 2)
-        sourceAddRow.addWidget(self.customSourceButton)
-        sourceAddRow.addWidget(self.customSourceListReset)
-        sourceAddRow.addWidget(self.customSourcePresetButton)
+        sourceAddRow.addWidget(self.customSourceInput, 0, 0, 1, 4)
+        sourceAddRow.addWidget(self.customSourceButton, 1, 0)
+        sourceAddRow.addWidget(self.customSourceListReset, 1, 1)
+        sourceAddRow.addWidget(self.customSourcePresetButton, 1, 2, 1, 2)
 
         localFilterRow = QHBoxLayout()
         localFilterLabel = QLabel("Library filter:")
@@ -1574,20 +2220,14 @@ class WadFinder(QWidget):
         localFilterRow.addWidget(localFilterLabel)
         localFilterRow.addWidget(self.localFilterInput, 1)
 
-        root.addWidget(self.sourceOrderList)
-        root.addLayout(sourceButtons)
-        root.addLayout(discoverRow)
-        root.addLayout(sourceAddRow)
-        root.addLayout(localFilterRow)
-
         # Search + local library.
         self.resultsTree = QTreeWidget()
-        self.resultsTree.setHeaderLabels(["Source", "Mod File", "Size", "Path"])
+        self.resultsTree.setHeaderLabels(["Source", "Mod File", "Description", "Size", "Path"])
         self.resultsTree.setSelectionMode(self.resultsTree.ExtendedSelection)
         self.resultsTree.setSortingEnabled(True)
         self.resultsTree.itemSelectionChanged.connect(self._on_selection_changed)
-        self.resultsTree.itemDoubleClicked.connect(self._add_selected)
-        self.resultsTree.setMinimumHeight(150)
+        self.resultsTree.itemDoubleClicked.connect(self._on_result_item_double_clicked)
+        self.resultsTree.setMinimumHeight(180)
 
         self.localTree = QTreeWidget()
         self.localTree.setHeaderLabels(["Local Mod", "Size", "Source", "Source Path"])
@@ -1595,79 +2235,137 @@ class WadFinder(QWidget):
         self.localTree.setSortingEnabled(True)
         self.localTree.itemSelectionChanged.connect(self._on_selection_changed)
         self.localTree.itemDoubleClicked.connect(self._add_selected)
+        self.localTree.setMinimumHeight(180)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self.resultsTree)
-        splitter.addWidget(self.localTree)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 2)
-
-        actions = QHBoxLayout()
-        self.openButton = QPushButton("Open in Browser")
+        self.openButton = QPushButton("Open Page")
+        self.openButton.setToolTip("Open the selected result page in your browser")
         self.openButton.clicked.connect(self._open_selected_remote)
+
+        self.resultDetailsButton = QPushButton("View Details")
+        self.resultDetailsButton.setToolTip("Show the full description for the selected result")
+        self.resultDetailsButton.clicked.connect(self._show_selected_result_details)
 
         self.downloadButton = QPushButton("Download")
         self.downloadButton.clicked.connect(self._download_selected)
 
-        self.selectAllResultsButton = QPushButton("Select All Results")
+        self.selectAllResultsButton = QPushButton("Select All")
+        self.selectAllResultsButton.setToolTip("Select every visible search result")
         self.selectAllResultsButton.clicked.connect(self._select_all_results)
 
-        self.downloadAllButton = QPushButton("Download All Results")
+        self.downloadAllButton = QPushButton("Download All")
+        self.downloadAllButton.setToolTip("Download every visible search result")
         self.downloadAllButton.clicked.connect(self._download_all_results)
         self.retryFailedButton = QPushButton("Retry Failed")
         self.retryFailedButton.clicked.connect(self._retry_failed_downloads)
         self.retryFailedButton.setToolTip("Retry only the failed downloads from the last batch.")
 
-        self.addAllButton = QPushButton("Add All Results")
+        self.addAllButton = QPushButton("Queue All")
+        self.addAllButton.setToolTip("Add every visible search result to the launch list")
         self.addAllButton.clicked.connect(self._add_all_results)
 
-        self.clearResultsSelectionButton = QPushButton("Clear Result Selection")
+        self.clearResultsSelectionButton = QPushButton("Clear Selection")
+        self.clearResultsSelectionButton.setToolTip("Clear the current result selection")
         self.clearResultsSelectionButton.clicked.connect(self._clear_results_selection)
 
-        self.addButton = QPushButton("Add to Launch List")
+        self.addButton = QPushButton("Queue Mod")
+        self.addButton.setToolTip("Add the selected result to the launch list")
         self.addButton.clicked.connect(self._add_selected)
 
-        self.deleteButton = QPushButton("Delete Downloaded")
+        self.deleteButton = QPushButton("Delete")
+        self.deleteButton.setToolTip("Delete the selected local files from the library")
         self.deleteButton.clicked.connect(self._delete_selected_local)
-        self.selectAllLocalButton = QPushButton("Select All Local")
+        self.selectAllLocalButton = QPushButton("Select All")
+        self.selectAllLocalButton.setToolTip("Select every local library entry")
         self.selectAllLocalButton.clicked.connect(self._select_all_local)
-        self.clearLocalSelectionButton = QPushButton("Clear Local Selection")
+        self.clearLocalSelectionButton = QPushButton("Clear Selection")
+        self.clearLocalSelectionButton.setToolTip("Clear the current local-library selection")
         self.clearLocalSelectionButton.clicked.connect(self._clear_local_selection)
         self.openLocalButton = QPushButton("Open File")
         self.openLocalButton.clicked.connect(self._open_selected_local_file)
         self.openLocalFolderButton = QPushButton("Open Folder")
         self.openLocalFolderButton.clicked.connect(self._open_selected_local_folder)
 
-        self.openLibraryButton = QPushButton("Open Library Folder")
+        self.openLibraryButton = QPushButton("Open Library")
+        self.openLibraryButton.setToolTip("Open the current library folder")
         self.openLibraryButton.clicked.connect(self._open_library_dir)
-        self.libraryDirButton = QPushButton("Set Library Folder")
+        self.libraryDirButton = QPushButton("Set Library")
+        self.libraryDirButton.setToolTip("Choose a different library folder")
         self.libraryDirButton.clicked.connect(self._change_library_dir)
 
-        actions.addWidget(self.openButton)
-        actions.addWidget(self.downloadButton)
-        actions.addWidget(self.downloadAllButton)
-        actions.addWidget(self.retryFailedButton)
-        actions.addWidget(self.selectAllResultsButton)
-        actions.addWidget(self.clearResultsSelectionButton)
-        actions.addWidget(self.addButton)
-        actions.addWidget(self.addAllButton)
-        actions.addWidget(self.deleteButton)
-        actions.addWidget(self.selectAllLocalButton)
-        actions.addWidget(self.clearLocalSelectionButton)
-        actions.addWidget(self.openLocalButton)
-        actions.addWidget(self.openLocalFolderButton)
-        actions.addWidget(self.openLibraryButton)
-        actions.addWidget(self.libraryDirButton)
-        root.addLayout(actions)
+        resultsActions = QGridLayout()
+        resultsActions.setHorizontalSpacing(8)
+        resultsActions.setVerticalSpacing(8)
+        resultsActions.addWidget(self.openButton, 0, 0)
+        resultsActions.addWidget(self.resultDetailsButton, 0, 1)
+        resultsActions.addWidget(self.downloadButton, 0, 2)
+        resultsActions.addWidget(self.addButton, 1, 0)
+        resultsActions.addWidget(self.addAllButton, 1, 1)
+        resultsActions.addWidget(self.downloadAllButton, 1, 2)
+        resultsActions.addWidget(self.retryFailedButton, 2, 0)
+        resultsActions.addWidget(self.selectAllResultsButton, 2, 1)
+        resultsActions.addWidget(self.clearResultsSelectionButton, 2, 2)
+
+        libraryActions = QGridLayout()
+        libraryActions.setHorizontalSpacing(8)
+        libraryActions.setVerticalSpacing(8)
+        libraryActions.addWidget(self.deleteButton, 0, 0)
+        libraryActions.addWidget(self.selectAllLocalButton, 0, 1)
+        libraryActions.addWidget(self.clearLocalSelectionButton, 1, 0)
+        libraryActions.addWidget(self.openLocalButton, 1, 1)
+        libraryActions.addWidget(self.openLocalFolderButton, 2, 0)
+        libraryActions.addWidget(self.openLibraryButton, 2, 1)
+        libraryActions.addWidget(self.libraryDirButton, 3, 0, 1, 2)
+
+        sourcesTab = QWidget()
+        sourcesLayout = QVBoxLayout(sourcesTab)
+        sourcesLayout.setContentsMargins(8, 8, 8, 8)
+        sourcesLayout.setSpacing(8)
+        sourcesLayout.addWidget(self.sourceOrderList, 1)
+        sourcesLayout.addLayout(sourceButtons)
+        sourcesLayout.addLayout(discoverRow)
+        sourcesLayout.addLayout(sourceAddRow)
+
+        resultsTab = QWidget()
+        resultsLayout = QVBoxLayout(resultsTab)
+        resultsLayout.setContentsMargins(8, 8, 8, 8)
+        resultsLayout.setSpacing(8)
+        resultsLayout.addWidget(self.resultsTree, 1)
+        resultsLayout.addLayout(resultsActions)
+
+        libraryTab = QWidget()
+        libraryLayout = QVBoxLayout(libraryTab)
+        libraryLayout.setContentsMargins(8, 8, 8, 8)
+        libraryLayout.setSpacing(8)
+        libraryLayout.addLayout(localFilterRow)
+        libraryLayout.addWidget(self.localTree, 1)
+        libraryLayout.addLayout(libraryActions)
 
         self.libraryDirLabel = QLabel(f"Library folder: {self.library_dir}")
-        root.addWidget(self.libraryDirLabel)
+        self.libraryDirLabel.setWordWrap(True)
+        libraryLayout.addWidget(self.libraryDirLabel)
 
+        self.browserTabs.addTab(resultsTab, "Results")
+        self.browserTabs.addTab(sourcesTab, "Sources")
+        self.browserTabs.addTab(libraryTab, "Library")
+        root.addWidget(self.browserTabs, 1)
+
+        searchStatusRow = QHBoxLayout()
         self.statusLabel = QLabel("Ready")
         self.statusLabel.setWordWrap(True)
-        root.addWidget(self.statusLabel)
+        self.searchProgressBar = QProgressBar()
+        self.searchProgressBar.setTextVisible(False)
+        self.searchProgressBar.setRange(0, 1)
+        self.searchProgressBar.setValue(0)
+        self.searchProgressBar.hide()
+
+        searchStatusRow.addWidget(self.statusLabel, 1)
+        searchStatusRow.addWidget(self.searchProgressBar)
+        root.addLayout(searchStatusRow)
+
+        self.searchFeedbackLabel = QLabel("")
+        self.searchFeedbackLabel.setWordWrap(True)
+        self.searchFeedbackLabel.hide()
+        root.addWidget(self.searchFeedbackLabel)
 
         self._refresh_local_library()
         self._refresh_retry_state()
@@ -1689,6 +2387,7 @@ class WadFinder(QWidget):
                         WadBrowserResult(
                             title=item["title"],
                             description=item.get("description", ""),
+                            metadata_text=item.get("metadata_text", ""),
                             source_id=item["source_id"],
                             source_name=item["source_name"],
                             size_bytes=int(item["size_bytes"]),
@@ -1757,6 +2456,7 @@ class WadFinder(QWidget):
                 {
                     "title": item.title,
                     "description": item.description,
+                    "metadata_text": item.metadata_text,
                     "source_id": item.source_id,
                     "source_name": item.source_name,
                     "size_bytes": item.size_bytes,
@@ -1967,6 +2667,7 @@ class WadFinder(QWidget):
         self.sourceOrderList.setEnabled(enabled)
         self.searchInput.setEnabled(enabled)
         self.openButton.setEnabled(enabled)
+        self.resultDetailsButton.setEnabled(enabled and bool(self._selected_search_results()))
         self.downloadButton.setEnabled(enabled)
         self.downloadAllButton.setEnabled(enabled and bool(self._rendered_results))
         self.addAllButton.setEnabled(enabled and bool(self._rendered_results))
@@ -2029,6 +2730,80 @@ class WadFinder(QWidget):
         self.statusLabel.setText(text)
         self.statusChanged.emit(text)
 
+    def _search_feedback_text(self, token: int) -> str:
+        session = self._search_sessions.get(token)
+        if not session:
+            return ""
+
+        query = str(session.get("query", "")).strip()
+        total = len(session.get("sources", ()))
+        if total <= 0:
+            total = 1
+        remaining = len(session.get("remaining", ()))
+        done = total - remaining
+
+        stats = session.get("source_stats", {})
+        scanned = sum(int(v.get("raw", 0)) for v in stats.values())
+        matched = sum(int(v.get("matched", 0)) for v in stats.values())
+        errors = sum(1 for v in stats.values() if v.get("status") == "error")
+        elapsed = time.time() - float(session.get("started_at", time.time()))
+
+        phase = str(session.get("phase", "searching"))
+        phase_label = {
+            "initial": "initial search",
+            "fallback_idgames": "fallback: other idgames mirrors",
+            "fallback_all_enabled": "fallback: all enabled sources",
+            "fallback_fullsort": "fallback: direct fullsort",
+            "relaxed": "fallback: relaxed matching",
+        }.get(phase, "searching")
+        if not query:
+            return (
+                f"No query (browse) · {done}/{total} sources in {elapsed:0.1f}s · "
+                f"scanned {scanned} index entries"
+            )
+
+        if _tokenize_query(query):
+            return (
+                f'Query "{query}" · {phase_label} · '
+                f"{done}/{total} sources in {elapsed:0.1f}s · "
+                f"scanned {scanned} entries, matched {matched}"
+                + (f", {errors} source errors" if errors else "")
+            )
+
+        return (
+            f'Terms are mostly stop-words for "{query}" · {done}/{total} sources in {elapsed:0.1f}s · '
+            f"{scanned} entries scanned"
+        )
+
+    def _update_search_feedback(self, token: int, *, in_progress: bool = True):
+        session = self._search_sessions.get(token)
+        if not session:
+            self.searchFeedbackLabel.hide()
+            self.searchProgressBar.hide()
+            return
+
+        total = len(session.get("sources", ()))
+        remaining = len(session.get("remaining", ()))
+        done = total - remaining
+        if total > 0:
+            self.searchProgressBar.setMaximum(max(total, 1))
+            self.searchProgressBar.setValue(done)
+            self.searchProgressBar.show()
+        else:
+            self.searchProgressBar.hide()
+
+        if in_progress:
+            self.searchFeedbackLabel.show()
+            self.searchProgressBar.show()
+        else:
+            self.searchProgressBar.hide()
+        self.searchFeedbackLabel.setText(self._search_feedback_text(token))
+
+    def _clear_search_feedback(self):
+        self.searchFeedbackLabel.clear()
+        self.searchFeedbackLabel.hide()
+        self.searchProgressBar.hide()
+
     def _change_library_dir(self):
         selected = QFileDialog.getExistingDirectory(
             self,
@@ -2059,7 +2834,11 @@ class WadFinder(QWidget):
             source = self.searchSources.get(selected_source)
             if source and source.get("enabled", True):
                 return [selected_source]
-            return []
+            return [
+                source_id
+                for source_id, source_data in self.searchSources.items()
+                if source_data.get("enabled", True)
+            ]
 
         ordered = []
         for idx in range(self.sourceOrderList.count()):
@@ -2070,7 +2849,22 @@ class WadFinder(QWidget):
                 continue
             if (item.checkState() == Qt.Checked and source.get("enabled", True)) and source_id in self.searchSources:
                 ordered.append(source_id)
+
+        if not ordered:
+            ordered = [
+                source_id
+                for source_id in self.sourceOrder
+                if (source := self.searchSources.get(source_id))
+                and source.get("enabled", True)
+            ]
+
         return ordered
+
+    @staticmethod
+    def _is_idgames_source(source: Dict[str, str]) -> bool:
+        base = str(source.get("base", "")).lower()
+        browser = str(source.get("browser", "")).lower()
+        return "idgames" in base or "idgames" in browser
 
     def _iter_source_rows(self, ids: Iterable[str]):
         for source_id in self.sourceOrder:
@@ -2776,6 +3570,7 @@ class WadFinder(QWidget):
         self.searchInput.clear()
         self.resultsTree.clear()
         self._rendered_results = []
+        self._clear_search_feedback()
         self._set_status("Search cleared.")
 
     def _on_search(self):
@@ -2785,6 +3580,7 @@ class WadFinder(QWidget):
         self.resultsTree.clear()
         if not source_ids:
             self._rendered_results = []
+            self._clear_search_feedback()
             self._set_status("No source selected.")
             return
 
@@ -2792,16 +3588,24 @@ class WadFinder(QWidget):
 
         self._search_token += 1
         token = self._search_token
+        selected_sources = list(self._iter_source_rows(source_ids))
         self._search_sessions[token] = {
             "query": query,
-            "sources": list(self._iter_source_rows(source_ids)),
-            "remaining": set(self._iter_source_rows(source_ids)),
+            "started_at": time.time(),
+            "sources": list(selected_sources),
+            "remaining": set(selected_sources),
+            "requested_sources": list(selected_sources),
             "results": {},
+            "raw_results": {},
             "errors": {},
             "ready": False,
+            "retry_count": 0,
+            "phase": "initial",
+            "source_stats": {},
         }
 
         self._set_status("Searching...")
+        self._update_search_feedback(token, in_progress=True)
         self._set_controls_enabled(False)
 
         started = 0
@@ -2812,7 +3616,7 @@ class WadFinder(QWidget):
                 continue
 
             cached = self._index_cache.get(source_id)
-            if self._is_cache_valid(source_id) and cached is not None:
+            if (not query) and self._is_cache_valid(source_id) and cached is not None:
                 source["status_message"] = f"Cached index: {_short_age(time.time() - cached.fetched_at)}"
                 source["status"] = SOURCE_STATUS_CACHED
                 source["status_checked_at"] = cached.fetched_at
@@ -2828,12 +3632,40 @@ class WadFinder(QWidget):
             self._set_source_status(source_id, SOURCE_STATUS_CHECKING, "Refreshing index")
             started += 1
             worker = _SearchWorker(token, source_id, source, query=query)
-            worker.signals.finished.connect(self._on_search_ready)
-            worker.signals.failed.connect(self._on_search_failed)
+            worker.setAutoDelete(False)
+            self._active_search_workers.add(worker)
+
+            def _on_search_worker_finished(_token: int, _source_id: str, payload: List[WadBrowserResult], _worker=worker):
+                self._active_search_workers.discard(_worker)
+                self._on_search_ready(_token, _source_id, payload)
+
+            def _on_search_worker_failed(_token: int, _source_id: str, error: str, _worker=worker):
+                self._active_search_workers.discard(_worker)
+                self._on_search_failed(_token, _source_id, error)
+
+            worker.signals.finished.connect(_on_search_worker_finished)
+            worker.signals.failed.connect(_on_search_worker_failed)
             self._thread_pool.start(worker)
 
         if not started:
             self._finalize_search_session(token)
+
+    def _collect_query_retry_sources(
+        self,
+        session: Dict[str, Any],
+        *,
+        include_disabled: bool = False,
+    ) -> List[str]:
+        excluded = set(session.get("sources", ()))
+        return [
+            source_id
+            for source_id in self.sourceOrder
+            if (
+                source_id not in excluded
+                and (include_disabled or self.searchSources.get(source_id, {}).get("enabled", True))
+                and self._is_idgames_source(self.searchSources.get(source_id, {}))
+            )
+        ]
 
     def _on_search_ready(self, token: int, source_id: str, payload: List[WadBrowserResult]):
         if token != self._search_token:
@@ -2845,7 +3677,15 @@ class WadFinder(QWidget):
         session["remaining"].discard(source_id)
 
         query = session["query"]
+        session.setdefault("raw_results", {})
+        session["raw_results"][source_id] = list(payload)
         filtered = self._filter_search_results(payload, query)
+        session.setdefault("source_stats", {})
+        session["source_stats"][source_id] = {
+            "status": "ok",
+            "raw": len(payload),
+            "matched": len(filtered),
+        }
         source = self.searchSources.get(source_id)
         if source:
             normalized_payload = list(payload[:MAX_CACHED_INDEX_ENTRIES])
@@ -2879,6 +3719,13 @@ class WadFinder(QWidget):
         session["remaining"].discard(source_id)
         source = self.searchSources.get(source_id, {})
         session["errors"][source_id] = f"{source.get('name', source_id)}: {error}"
+        session.setdefault("source_stats", {})
+        session["source_stats"][source_id] = {
+            "status": "error",
+            "raw": 0,
+            "matched": 0,
+            "error": error,
+        }
         self._set_source_status(
             source_id,
             SOURCE_STATUS_UNREACHABLE,
@@ -2897,13 +3744,8 @@ class WadFinder(QWidget):
         total = len(session.get("sources", []))
         if total <= 0:
             return
-        remaining = len(session.get("remaining", []))
-        completed = total - remaining
-        errors = len(session.get("errors", {}))
-        if errors:
-            self._set_status(f"Searching... {completed}/{total} sources done ({errors} errors).")
-        else:
-            self._set_status(f"Searching... {completed}/{total} sources done.")
+        self._update_search_feedback(token, in_progress=True)
+        self._set_status(self._search_feedback_text(token))
 
     def _filter_search_results(self, entries: List[WadBrowserResult], query: str) -> List[WadBrowserResult]:
         if not query:
@@ -2912,33 +3754,139 @@ class WadFinder(QWidget):
             return filtered[:DEFAULT_SOURCE_LIMIT]
 
         q = query.strip().lower()
-        tokens = [token for token in q.split() if token]
-        filtered = []
+        filtered: List[WadBrowserResult] = []
+        fallback_filtered: List[WadBrowserResult] = []
+        loose_matches: List[WadBrowserResult] = []
+        query_tokens = _tokenize_query(q)
         for item in entries:
-            haystack = f"{item.title} {item.remote_path} {item.description}".lower()
-            if all(token in haystack for token in tokens):
+            haystack = _result_search_blob(item)
+            if _query_matches(haystack, q):
                 filtered.append(item)
-        filtered.sort(
-            key=lambda item: (self._search_score(item, q), item.size_bytes),
+                continue
+            if _query_matches_any(haystack, q):
+                fallback_filtered.append(item)
+                continue
+
+            if query_tokens:
+                filename = Path(item.remote_path).name.lower()
+                title = item.title.lower()
+                compact_filename = re.sub(r"[^a-z0-9]+", "", filename)
+                compact_title = re.sub(r"[^a-z0-9]+", "", title)
+                if (
+                    any(token in filename or token in compact_filename for token in query_tokens)
+                    or any(token in title or token in compact_title for token in query_tokens)
+                ):
+                    loose_matches.append(item)
+
+        combined = []
+        dedupe = set()
+        for item in filtered:
+            key = _result_identity(item)
+            if key in dedupe:
+                continue
+            dedupe.add(key)
+            combined.append((item, 1))
+
+        for item in fallback_filtered:
+            key = _result_identity(item)
+            if key in dedupe:
+                continue
+            dedupe.add(key)
+            combined.append((item, 0))
+
+        for item in loose_matches:
+            key = _result_identity(item)
+            if key in dedupe:
+                continue
+            dedupe.add(key)
+            combined.append((item, -1))
+
+        return [item for item, _priority in sorted(
+            combined,
+            key=lambda payload: (
+                payload[1],
+                self._search_score(payload[0], q),
+                payload[0].size_bytes,
+            ),
+            reverse=True,
+        )][:DEFAULT_SOURCE_LIMIT]
+
+    def _filter_search_results_relaxed(self, entries: List[WadBrowserResult], query: str) -> List[WadBrowserResult]:
+        if not query:
+            return sorted(entries, key=lambda item: item.size_bytes, reverse=True)[:DEFAULT_SOURCE_LIMIT]
+
+        q = query.strip().lower()
+        query_tokens = _tokenize_query(q)
+        if not query_tokens:
+            return sorted(entries, key=lambda item: item.size_bytes, reverse=True)[:DEFAULT_SOURCE_LIMIT]
+
+        loose: List[WadBrowserResult] = []
+        dedupe = set()
+        for item in entries:
+            title = item.title.lower()
+            path = item.remote_path.lower()
+            filename = Path(item.remote_path).name.lower()
+            description = item.description.lower()
+            metadata = item.metadata_text.lower()
+            compact_path = re.sub(r"[^a-z0-9]+", "", path)
+            compact_title = re.sub(r"[^a-z0-9]+", "", title)
+            compact_filename = re.sub(r"[^a-z0-9]+", "", filename)
+            compact_description = re.sub(r"[^a-z0-9]+", "", description)
+
+            haystack = f"{title}|{filename}|{path}|{description}|{metadata}".lower()
+            haystack_compact = f"{compact_title}|{compact_filename}|{compact_path}|{compact_description}"
+
+            if any(
+                token in haystack or token in haystack_compact
+                for token in query_tokens
+            ):
+                key = _result_identity(item)
+                if key in dedupe:
+                    continue
+                dedupe.add(key)
+                loose.append(item)
+
+        loose.sort(
+            key=lambda item: (
+                self._search_score(item, q),
+                item.size_bytes,
+                item.title.lower(),
+            ),
             reverse=True,
         )
-        return filtered[:DEFAULT_SOURCE_LIMIT]
+        return loose[:DEFAULT_SOURCE_LIMIT]
 
     @staticmethod
     def _search_score(item: WadBrowserResult, query: str) -> int:
         if not query:
             return 0
         normalized = query.strip().lower()
+        tokens = _tokenize_query(normalized)
+        if not tokens:
+            return 0
         title = item.title.lower()
         path = item.remote_path.lower()
         description = item.description.lower()
+        metadata_text = item.metadata_text.lower()
+        score = 0
         if normalized in title:
-            return 120
+            score += 120
         if normalized in path:
-            return 80
+            score += 90
         if normalized in description:
-            return 40
-        return 0
+            score += 60
+        if normalized in metadata_text:
+            score += 45
+        for token in tokens:
+            if token in title:
+                score += 18
+            if token in path:
+                score += 12
+            if token in description:
+                score += 9
+            if token in metadata_text:
+                score += 6
+        return score
 
     def _render_search_results(self, token: int):
         session = self._search_sessions.get(token)
@@ -2985,16 +3933,21 @@ class WadFinder(QWidget):
             )
 
         for item in merged:
+            details = _normalize_metadata_text(item.description, item.metadata_text)
+            summary = _summarize_text(details)
             row = QTreeWidgetItem([
                 item.source_name,
                 item.title,
+                summary,
                 _human_size(item.size_bytes),
                 item.remote_path,
             ])
             row.setData(0, Qt.UserRole, item)
-            row.setData(2, Qt.UserRole, item.size_bytes)
-            if item.description:
-                row.setToolTip(1, item.description)
+            row.setData(3, Qt.UserRole, item.size_bytes)
+            if details:
+                row.setToolTip(1, details)
+                row.setToolTip(2, details)
+                row.setToolTip(4, details)
             self.resultsTree.addTopLevelItem(row)
         self._rendered_results = merged
         self._on_selection_changed()
@@ -3004,12 +3957,257 @@ class WadFinder(QWidget):
         if not session:
             return
 
+        query = str(session.get("query", "")).strip()
+        query_tokens = _tokenize_query(query)
+        retry_count = int(session.get("retry_count", 0))
+        elapsed = time.time() - float(session.get("started_at", time.time()))
+        source_count = max(len(session.get("sources", ())), 1)
+        source_stats = session.get("source_stats", {})
+        scanned_entries = sum(int(item.get("raw", 0)) for item in source_stats.values())
+        prefiltered_hits = sum(int(item.get("matched", 0)) for item in source_stats.values())
+        sources_done = len(source_stats)
+        error_count = len(session.get("errors", {}))
+
         count = sum(len(items) for items in session["results"].values())
-        status = f"Found {count} result(s)."
-        if session["errors"]:
-            status += " " + "; ".join(sorted(session["errors"].values()))
         if count == 0:
-            status = "No matches. Try a broader query or another source."
+            if query and retry_count < 1:
+                fallback_sources = self._collect_query_retry_sources(
+                    session,
+                    include_disabled=False,
+                )
+                if not fallback_sources:
+                    fallback_sources = self._collect_query_retry_sources(
+                        session,
+                        include_disabled=True,
+                    )
+                    if fallback_sources:
+                        self._set_status("Primary source had no matches; expanding search to all Doomworld mirrors.")
+
+                if fallback_sources:
+                    session["retry_count"] = retry_count + 1
+                    session["sources"].extend(fallback_sources)
+                    session["remaining"] = set(fallback_sources)
+                    session["phase"] = "fallback_idgames"
+
+                    for source_id in fallback_sources:
+                        source = self.searchSources.get(source_id)
+                        if not source:
+                            session["remaining"].discard(source_id)
+                            continue
+                        self._set_source_status(source_id, SOURCE_STATUS_CHECKING, "Searching fallback source")
+                        worker = _SearchWorker(token, source_id, source, query=query)
+                        worker.setAutoDelete(False)
+                        self._active_search_workers.add(worker)
+
+                        def _on_search_worker_finished(_token: int, _source_id: str, payload: List[WadBrowserResult], _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_ready(_token, _source_id, payload)
+
+                        def _on_search_worker_failed(_token: int, _source_id: str, error: str, _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_failed(_token, _source_id, error)
+
+                        worker.signals.finished.connect(_on_search_worker_finished)
+                        worker.signals.failed.connect(_on_search_worker_failed)
+                        self._thread_pool.start(worker)
+
+                    self._set_status("No matches found, retrying with all enabled idgames mirrors...")
+                    return
+
+            # If only one branch was available (or all enabled mirrors were already
+            # searched) retry once more against every remaining enabled source.
+            if query and retry_count < 2:
+                fallback_sources = [
+                    source_id
+                    for source_id in self.sourceOrder
+                    if (
+                        source_id not in session.get("sources", ())
+                        and self.searchSources.get(source_id, {}).get("enabled", True)
+                    )
+                ]
+                if not fallback_sources:
+                    fallback_sources = [
+                        source_id
+                        for source_id in self.sourceOrder
+                        if (
+                            source_id not in session.get("sources", ())
+                            and self._is_idgames_source(self.searchSources.get(source_id, {}))
+                        )
+                    ]
+
+                if fallback_sources:
+                    session["retry_count"] = retry_count + 1
+                    session["sources"].extend(fallback_sources)
+                    session["remaining"] = set(fallback_sources)
+                    session["phase"] = "fallback_all_enabled"
+
+                    for source_id in fallback_sources:
+                        source = self.searchSources.get(source_id)
+                        if not source:
+                            session["remaining"].discard(source_id)
+                            continue
+                        self._set_source_status(
+                            source_id,
+                            SOURCE_STATUS_CHECKING,
+                            "Retrying search on all enabled sources",
+                        )
+                        worker = _SearchWorker(token, source_id, source, query=query)
+                        worker.setAutoDelete(False)
+                        self._active_search_workers.add(worker)
+
+                        def _on_search_worker_finished_retry(_token: int, _source_id: str, payload: List[WadBrowserResult], _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_ready(_token, _source_id, payload)
+
+                        def _on_search_worker_failed_retry(_token: int, _source_id: str, error: str, _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_failed(_token, _source_id, error)
+
+                        worker.signals.finished.connect(_on_search_worker_finished_retry)
+                        worker.signals.failed.connect(_on_search_worker_failed_retry)
+                        self._thread_pool.start(worker)
+
+                    self._set_status("No matches, retrying with all enabled sources...")
+                    return
+
+            if query and retry_count < 3:
+                fallback_sources = [
+                    source_id
+                    for source_id in self.sourceOrder
+                    if source_id not in session.get("sources", ())
+                    and self.searchSources.get(source_id, {}).get("enabled", True)
+                ]
+
+                if not fallback_sources:
+                    fallback_sources = [
+                        source_id
+                        for source_id in self.sourceOrder
+                        if self.searchSources.get(source_id, {}).get("enabled", True)
+                        and source_id not in session.get("sources", ())
+                    ]
+                if not fallback_sources and len(session.get("requested_sources", [])) == 1:
+                    fallback_sources = [
+                        source_id
+                        for source_id in self.sourceOrder
+                        if source_id not in session.get("sources", ())
+                        and self.searchSources.get(source_id, {}).get("status", SOURCE_STATUS_UNKNOWN)
+                        != SOURCE_STATUS_DISABLED
+                    ]
+
+                if not fallback_sources:
+                    status = "No matches. Try a broader query or another source."
+                    session["retry_count"] = retry_count
+                    # No additional retry candidates are available.
+                else:
+                    session["retry_count"] = retry_count + 1
+                    for source_id in fallback_sources:
+                        if source_id not in session["sources"]:
+                            session["sources"].append(source_id)
+                    session["remaining"] = set(fallback_sources)
+
+                    for source_id in fallback_sources:
+                        source = self.searchSources.get(source_id)
+                        if not source:
+                            session["remaining"].discard(source_id)
+                            continue
+
+                        force_fullsort = dict(source)
+                        force_fullsort["parser"] = "fullsort"
+                        force_fullsort.setdefault("index", "fullsort.gz")
+
+                        self._set_source_status(
+                            source_id,
+                            SOURCE_STATUS_CHECKING,
+                            "Retrying query with direct fullsort",
+                        )
+                        worker = _SearchWorker(token, source_id, force_fullsort, query=query)
+                        worker.setAutoDelete(False)
+                        self._active_search_workers.add(worker)
+
+                        def _on_search_worker_finished_fullsort(_token: int, _source_id: str, payload: List[WadBrowserResult], _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_ready(_token, _source_id, payload)
+
+                        def _on_search_worker_failed_fullsort(_token: int, _source_id: str, error: str, _worker=worker):
+                            self._active_search_workers.discard(_worker)
+                            self._on_search_failed(_token, _source_id, error)
+
+                        worker.signals.finished.connect(_on_search_worker_finished_fullsort)
+                        worker.signals.failed.connect(_on_search_worker_failed_fullsort)
+                        self._thread_pool.start(worker)
+
+                    self._set_status("No matches. Re-running enabled sources with direct fullsort search...")
+                    session["phase"] = "fallback_fullsort"
+                    return
+
+            if query and not session.get("relaxed_applied"):
+                raw_payloads = [
+                    item
+                    for payload in session.get("raw_results", {}).values()
+                    for item in payload
+                ]
+                relaxed = self._filter_search_results_relaxed(raw_payloads, query)
+                if relaxed:
+                    session["relaxed_applied"] = True
+                    session["phase"] = "relaxed"
+                    session["sources"] = ["_fallback_relaxed"]
+                    session["results"] = {"_fallback_relaxed": relaxed}
+                    self._set_search_progress(token)
+                    self._render_search_results(token)
+                    self._search_sessions.pop(token, None)
+                    self._refresh_controls_for_state()
+                    self.searchFeedbackLabel.setText(
+                        (
+                            f"Relaxed matching engaged · completed in {elapsed:0.1f}s. "
+                            f"Showing broader filename/path matches for '{query}'."
+                        )
+                    )
+                    self.searchFeedbackLabel.show()
+                    self.searchProgressBar.hide()
+                    self._set_status("No exact matches. Showing relaxed filename/path matches.")
+                    return
+
+            if not query:
+                status = (
+                    f"No entries found for the selected source set. "
+                    f"Try enabling more sources or rebuilding indexes."
+                )
+            elif not query_tokens:
+                status = f'No usable query terms in "{query}". Try "blood", "skeleton", or "river".'
+            else:
+                status = f'No matches for "{query}".'
+
+            details = [
+                f"Complete in {elapsed:0.1f}s",
+                f"Sources done: {sources_done}/{source_count}",
+                f"Entries scanned: {scanned_entries}",
+                f"Matched: {prefiltered_hits}",
+            ]
+            if error_count:
+                details.append(f"{error_count} source issue(s)")
+            status = f"{status} ({', '.join(details)})"
+            if error_count:
+                status += " Check source health and network."
+
+            self.searchFeedbackLabel.setText(status)
+            self.searchFeedbackLabel.show()
+            self.searchProgressBar.hide()
+        else:
+            status = (
+                f"Found {count} result(s) in {elapsed:0.1f}s across "
+                f"{sources_done}/{source_count} source(s)."
+            )
+            if session["errors"]:
+                status += " " + "; ".join(sorted(session["errors"].values()))
+            self.searchFeedbackLabel.setText(
+                (
+                    f"Found {count} result(s). "
+                    f"Completed in {elapsed:0.1f}s, scanned {scanned_entries} entries, "
+                    f"matched {prefiltered_hits} entries."
+                )
+            )
+            self.searchFeedbackLabel.show()
+            self.searchProgressBar.hide()
 
         self._search_sessions.pop(token, None)
         self._refresh_controls_for_state()
@@ -3024,6 +4222,7 @@ class WadFinder(QWidget):
         delete_enabled = bool(local_count)
 
         self.openButton.setEnabled(open_enabled)
+        self.resultDetailsButton.setEnabled(open_enabled)
         self.downloadButton.setEnabled(download_enabled)
         self.downloadAllButton.setEnabled(bool(self._rendered_results))
         self.selectAllResultsButton.setEnabled(self.resultsTree.topLevelItemCount() > 0)
@@ -3049,6 +4248,62 @@ class WadFinder(QWidget):
                 if isinstance(payload, WadBrowserResult):
                     ordered.append(payload)
         return ordered
+
+    def _result_details_text(self, result: WadBrowserResult) -> str:
+        details = _normalize_metadata_text(result.description, result.metadata_text)
+        if not details:
+            details = "No description available."
+        return (
+            f"Title: {result.title}\n"
+            f"Source: {result.source_name}\n"
+            f"Size: {_human_size(result.size_bytes)}\n"
+            f"Path: {result.remote_path}\n"
+            f"Download: {result.download_url}\n\n"
+            f"{details}"
+        )
+
+    def _show_result_details(self, result: WadBrowserResult):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Result Details: {result.title}")
+        dialog.resize(760, 420)
+
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            f"<b>{escape(result.title)}</b><br>"
+            f"Source: {escape(result.source_name)}<br>"
+            f"Size: {escape(_human_size(result.size_bytes))}<br>"
+            f"Path: {escape(result.remote_path)}"
+        )
+        summary.setTextFormat(Qt.RichText)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        details = QPlainTextEdit(dialog)
+        details.setReadOnly(True)
+        details.setPlainText(self._result_details_text(result))
+        layout.addWidget(details, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def _show_selected_result_details(self):
+        selected = self._selected_search_results()
+        if not selected:
+            self._set_status("No search item selected to inspect.")
+            return
+        self._show_result_details(selected[0])
+
+    def _on_result_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+        payload = item.data(0, Qt.UserRole)
+        if not isinstance(payload, WadBrowserResult):
+            return
+        if column == 2:
+            self._show_result_details(payload)
+            return
+        self._add_selected()
 
     def _selected_local_files(self) -> List[str]:
         selected: List[str] = []
@@ -3145,6 +4400,7 @@ class WadFinder(QWidget):
         payload = {
             "title": result.title,
             "description": result.description,
+            "metadata_text": result.metadata_text,
             "source_id": result.source_id,
             "source_name": result.source_name,
             "remote_path": result.remote_path,
@@ -3190,6 +4446,8 @@ class WadFinder(QWidget):
                     "source_path": metadata.get("remote_path") or "-",
                     "source_id": metadata.get("source_id") or "local",
                     "title": metadata.get("title") or path.name,
+                    "description": metadata.get("description") or "",
+                    "metadata_text": metadata.get("metadata_text") or "",
                 }
             )
 
@@ -3205,6 +4463,8 @@ class WadFinder(QWidget):
         haystack = (
             f"{row.get('name', '')} "
             f"{row.get('title', '')} "
+            f"{row.get('description', '')} "
+            f"{row.get('metadata_text', '')} "
             f"{row.get('source', '')} "
             f"{row.get('source_path', '')} "
             f"{row.get('source_id', '')}"
@@ -3224,6 +4484,10 @@ class WadFinder(QWidget):
             file_path = row.get("path", "")
             item.setData(0, Qt.UserRole, file_path)
             item.setToolTip(0, str(file_path))
+            details = _normalize_metadata_text(row.get("description", ""), row.get("metadata_text", ""))
+            if details:
+                item.setToolTip(2, details)
+                item.setToolTip(3, details)
             if file_path in selected:
                 item.setSelected(True)
             self.localTree.addTopLevelItem(item)
@@ -3333,6 +4597,7 @@ class WadFinder(QWidget):
             result = WadBrowserResult(
                 title=Path(destination).name,
                 description="",
+                metadata_text="",
                 source_id="direct",
                 source_name="Downloaded",
                 size_bytes=0,

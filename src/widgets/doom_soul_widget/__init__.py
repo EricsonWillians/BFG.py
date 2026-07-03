@@ -187,7 +187,7 @@ def get_temp_tile_path():
 class DoomSoulWidget(QWidget):
     def __init__(self, skull_gif_path: str, parent=None, tile_w=96, tile_h=64, animated_background=False):
         super().__init__(parent)
-        self.setMinimumSize(180, 180)
+        self.setMinimumSize(180, 140)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self._tile_w, self._tile_h = tile_w, tile_h
