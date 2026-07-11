@@ -308,6 +308,15 @@ class DoomSoulWidget(QWidget):
     def _tile_scroll_adjust(self):
         return self._scroll
 
+    def setPlaybackPaused(self, paused: bool):
+        """Suspend decorative animation while the widget is hidden for space."""
+        paused = bool(paused)
+        self.skull_gif.setPaused(paused)
+        if paused:
+            self._timer.stop()
+        elif self._animated_background:
+            self._timer.start(self._timer_interval())
+
     def closeEvent(self, event):
         if self._tile_key and self._tile_path:
             release_tile_file(*self._tile_key, path=self._tile_path)

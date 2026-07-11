@@ -8,6 +8,7 @@ import re
 import time
 import webbrowser
 import xml.etree.ElementTree as ET
+import zipfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,14 +17,16 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
-    QApplication,
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
     QGridLayout,
+    QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QFileDialog,
@@ -35,6 +38,8 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QTabWidget,
     QProgressBar,
+    QScrollArea,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -1732,6 +1737,16 @@ class _DownloadWorker(QRunnable):
                         fp.write(chunk)
                         downloaded += len(chunk)
                         self.signals.progress.emit(self.token, downloaded, total, self.url)
+                if downloaded <= 0:
+                    raise RuntimeError("server returned an empty file")
+                suffix = Path(self.destination).suffix.lower()
+                if suffix == ".wad":
+                    with open(tmp, "rb") as fp:
+                        if fp.read(4) not in {b"IWAD", b"PWAD"}:
+                            raise RuntimeError("download is not a valid WAD file")
+                elif suffix in {".zip", ".pk3", ".ipk3", ".pk7", ".pke"}:
+                    if not zipfile.is_zipfile(tmp):
+                        raise RuntimeError("download is not a valid ZIP-based mod package")
                 os.replace(tmp, self.destination)
             self.signals.finished.emit(self.token, self.destination, self.url)
         except Exception as exc:  # pragma: no cover - network path
@@ -1983,6 +1998,7 @@ class WadFinder(QWidget):
     addRequested = pyqtSignal(list)
     removedRequested = pyqtSignal(list)
     statusChanged = pyqtSignal(str)
+    browserModeRequested = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -2105,10 +2121,24 @@ class WadFinder(QWidget):
         root.setSpacing(8)
         root.setContentsMargins(6, 6, 6, 6)
 
-        title = QLabel("PWAD Browser")
+        headerRow = QHBoxLayout()
+        title = QLabel("BFG ONLINE TERMINAL // PWAD EXCHANGE")
+        title.setObjectName("terminalTitle")
         title.setFrameStyle(QFrame.Box | QFrame.Raised)
         title.setAlignment(Qt.AlignCenter)
-        root.addWidget(title)
+        headerRow.addWidget(title, 1)
+        self.expandBrowserButton = QPushButton("EXPAND")
+        self.expandBrowserButton.setCheckable(True)
+        self.expandBrowserButton.setObjectName("primaryButton")
+        self.expandBrowserButton.setToolTip("Give the mod browser the full application window")
+        self.expandBrowserButton.toggled.connect(self._on_browser_mode_toggled)
+        headerRow.addWidget(self.expandBrowserButton)
+        root.addLayout(headerRow)
+
+        self.browserSubtitle = QLabel("SEARCH  >  INSPECT  >  DOWNLOAD + QUEUE  >  REORDER  >  UNLEASH")
+        self.browserSubtitle.setObjectName("mutedHint")
+        self.browserSubtitle.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.browserSubtitle)
 
         # Search controls.
         searchRow = QHBoxLayout()
@@ -2121,9 +2151,10 @@ class WadFinder(QWidget):
         self.searchInput.setPlaceholderText("Search by filename, theme, description, author, or mod name")
         self.searchInput.returnPressed.connect(self._on_search)
 
-        self.searchButton = QPushButton("Search")
+        self.searchButton = QPushButton("SEARCH NETWORK")
+        self.searchButton.setObjectName("primaryButton")
         self.searchButton.clicked.connect(self._on_search)
-        self.clearSearchButton = QPushButton("Clear")
+        self.clearSearchButton = QPushButton("RESET")
         self.clearSearchButton.clicked.connect(self._on_clear_search)
         searchRow.addWidget(self.sourceCombo, 1)
         searchRow.addWidget(self.searchInput, 3)
@@ -2141,7 +2172,7 @@ class WadFinder(QWidget):
         self.sourceOrderList.setAcceptDrops(True)
         self.sourceOrderList.setDropIndicatorShown(True)
         self.sourceOrderList.setDefaultDropAction(Qt.MoveAction)
-        self.sourceOrderList.setMinimumHeight(180)
+        self.sourceOrderList.setMinimumHeight(150)
         self._rebuild_source_list()
 
         sourceButtons = QGridLayout()
@@ -2169,15 +2200,17 @@ class WadFinder(QWidget):
 
         sourceButtons.addWidget(self.sourceUpButton, 0, 0)
         sourceButtons.addWidget(self.sourceDownButton, 0, 1)
-        sourceButtons.addWidget(self.sourceTopButton, 0, 2)
-        sourceButtons.addWidget(self.sourceBottomButton, 0, 3)
-        sourceButtons.addWidget(self.sourceToggleButton, 0, 4)
-        sourceButtons.addWidget(self.sourceEnableAllButton, 1, 0)
-        sourceButtons.addWidget(self.sourceDisableAllButton, 1, 1)
-        sourceButtons.addWidget(self.sourcePurgeButton, 1, 2)
-        sourceButtons.addWidget(self.sourceRemoveButton, 1, 3)
+        sourceButtons.addWidget(self.sourceToggleButton, 0, 2)
+        sourceButtons.addWidget(self.sourceTopButton, 1, 0)
+        sourceButtons.addWidget(self.sourceBottomButton, 1, 1)
+        sourceButtons.addWidget(self.sourceRemoveButton, 1, 2)
+        sourceButtons.addWidget(self.sourceEnableAllButton, 2, 0)
+        sourceButtons.addWidget(self.sourceDisableAllButton, 2, 1)
+        sourceButtons.addWidget(self.sourcePurgeButton, 2, 2)
 
-        discoverRow = QHBoxLayout()
+        discoverRow = QGridLayout()
+        discoverRow.setHorizontalSpacing(8)
+        discoverRow.setVerticalSpacing(8)
         self.discoverSeedInput = QLineEdit()
         self.discoverSeedInput.setPlaceholderText(
             "Optional discovery seed URLs (comma/space separated)"
@@ -2188,9 +2221,9 @@ class WadFinder(QWidget):
         self.discoverSourcesButton.clicked.connect(self._discover_mirrors)
         self.discoverClearDiscoveredButton = QPushButton("Clear Discovered")
         self.discoverClearDiscoveredButton.clicked.connect(self._clear_discovered_sources)
-        discoverRow.addWidget(self.discoverSeedInput, 1)
-        discoverRow.addWidget(self.discoverSourcesButton)
-        discoverRow.addWidget(self.discoverClearDiscoveredButton)
+        discoverRow.addWidget(self.discoverSeedInput, 0, 0, 1, 2)
+        discoverRow.addWidget(self.discoverSourcesButton, 1, 0)
+        discoverRow.addWidget(self.discoverClearDiscoveredButton, 1, 1)
 
         sourceAddRow = QGridLayout()
         sourceAddRow.setHorizontalSpacing(8)
@@ -2222,20 +2255,33 @@ class WadFinder(QWidget):
 
         # Search + local library.
         self.resultsTree = QTreeWidget()
-        self.resultsTree.setHeaderLabels(["Source", "Mod File", "Description", "Size", "Path"])
+        self.resultsTree.setObjectName("downloadResults")
+        self.resultsTree.setHeaderLabels(["Source", "Mod / package", "Description", "Size", "Archive path"])
         self.resultsTree.setSelectionMode(self.resultsTree.ExtendedSelection)
+        self.resultsTree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.resultsTree.setAlternatingRowColors(True)
+        self.resultsTree.setUniformRowHeights(True)
         self.resultsTree.setSortingEnabled(True)
         self.resultsTree.itemSelectionChanged.connect(self._on_selection_changed)
         self.resultsTree.itemDoubleClicked.connect(self._on_result_item_double_clicked)
-        self.resultsTree.setMinimumHeight(180)
+        self.resultsTree.setMinimumHeight(140)
+        self.resultsTree.header().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.resultsTree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.resultsTree.header().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.resultsTree.header().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.resultsTree.header().setSectionResizeMode(4, QHeaderView.Interactive)
+        self.resultsTree.setColumnWidth(0, 120)
+        self.resultsTree.setColumnWidth(4, 220)
 
         self.localTree = QTreeWidget()
-        self.localTree.setHeaderLabels(["Local Mod", "Size", "Source", "Source Path"])
+        self.localTree.setObjectName("modLibrary")
+        self.localTree.setAlternatingRowColors(True)
+        self.localTree.setHeaderLabels(["Library file", "Size", "Source", "Installed", "Remote path"])
         self.localTree.setSelectionMode(self.localTree.ExtendedSelection)
         self.localTree.setSortingEnabled(True)
         self.localTree.itemSelectionChanged.connect(self._on_selection_changed)
         self.localTree.itemDoubleClicked.connect(self._add_selected)
-        self.localTree.setMinimumHeight(180)
+        self.localTree.setMinimumHeight(100)
 
         self.openButton = QPushButton("Open Page")
         self.openButton.setToolTip("Open the selected result page in your browser")
@@ -2245,21 +2291,22 @@ class WadFinder(QWidget):
         self.resultDetailsButton.setToolTip("Show the full description for the selected result")
         self.resultDetailsButton.clicked.connect(self._show_selected_result_details)
 
-        self.downloadButton = QPushButton("Download")
+        self.downloadButton = QPushButton("DOWNLOAD ONLY")
+        self.downloadButton.setToolTip("Save the selected mods to the library without changing the launch loadout")
         self.downloadButton.clicked.connect(self._download_selected)
 
         self.selectAllResultsButton = QPushButton("Select All")
         self.selectAllResultsButton.setToolTip("Select every visible search result")
         self.selectAllResultsButton.clicked.connect(self._select_all_results)
 
-        self.downloadAllButton = QPushButton("Download All")
+        self.downloadAllButton = QPushButton("DOWNLOAD ALL")
         self.downloadAllButton.setToolTip("Download every visible search result")
         self.downloadAllButton.clicked.connect(self._download_all_results)
         self.retryFailedButton = QPushButton("Retry Failed")
         self.retryFailedButton.clicked.connect(self._retry_failed_downloads)
         self.retryFailedButton.setToolTip("Retry only the failed downloads from the last batch.")
 
-        self.addAllButton = QPushButton("Queue All")
+        self.addAllButton = QPushButton("DOWNLOAD + QUEUE ALL")
         self.addAllButton.setToolTip("Add every visible search result to the launch list")
         self.addAllButton.clicked.connect(self._add_all_results)
 
@@ -2267,11 +2314,13 @@ class WadFinder(QWidget):
         self.clearResultsSelectionButton.setToolTip("Clear the current result selection")
         self.clearResultsSelectionButton.clicked.connect(self._clear_results_selection)
 
-        self.addButton = QPushButton("Queue Mod")
-        self.addButton.setToolTip("Add the selected result to the launch list")
+        self.addButton = QPushButton("DOWNLOAD + QUEUE")
+        self.addButton.setObjectName("primaryButton")
+        self.addButton.setToolTip("Download remote selections if needed, then add everything to the launch loadout")
         self.addButton.clicked.connect(self._add_selected)
 
-        self.deleteButton = QPushButton("Delete")
+        self.deleteButton = QPushButton("DELETE FILE")
+        self.deleteButton.setObjectName("dangerButton")
         self.deleteButton.setToolTip("Delete the selected local files from the library")
         self.deleteButton.clicked.connect(self._delete_selected_local)
         self.selectAllLocalButton = QPushButton("Select All")
@@ -2280,8 +2329,14 @@ class WadFinder(QWidget):
         self.clearLocalSelectionButton = QPushButton("Clear Selection")
         self.clearLocalSelectionButton.setToolTip("Clear the current local-library selection")
         self.clearLocalSelectionButton.clicked.connect(self._clear_local_selection)
-        self.openLocalButton = QPushButton("Open File")
-        self.openLocalButton.clicked.connect(self._open_selected_local_file)
+        self.selectAllLocalButton.hide()
+        self.clearLocalSelectionButton.hide()
+        self.openLocalButton = QPushButton("QUEUE SELECTED")
+        self.openLocalButton.setObjectName("primaryButton")
+        self.openLocalButton.setToolTip("Add selected library files to the launch loadout")
+        self.openLocalButton.clicked.connect(self._add_selected)
+        self.inspectLocalButton = QPushButton("OPEN FILE")
+        self.inspectLocalButton.clicked.connect(self._open_selected_local_file)
         self.openLocalFolderButton = QPushButton("Open Folder")
         self.openLocalFolderButton.clicked.connect(self._open_selected_local_folder)
 
@@ -2295,41 +2350,97 @@ class WadFinder(QWidget):
         resultsActions = QGridLayout()
         resultsActions.setHorizontalSpacing(8)
         resultsActions.setVerticalSpacing(8)
-        resultsActions.addWidget(self.openButton, 0, 0)
-        resultsActions.addWidget(self.resultDetailsButton, 0, 1)
-        resultsActions.addWidget(self.downloadButton, 0, 2)
-        resultsActions.addWidget(self.addButton, 1, 0)
-        resultsActions.addWidget(self.addAllButton, 1, 1)
-        resultsActions.addWidget(self.downloadAllButton, 1, 2)
-        resultsActions.addWidget(self.retryFailedButton, 2, 0)
-        resultsActions.addWidget(self.selectAllResultsButton, 2, 1)
-        resultsActions.addWidget(self.clearResultsSelectionButton, 2, 2)
+        resultsActions.addWidget(self.addButton, 0, 0)
+        resultsActions.addWidget(self.downloadButton, 0, 1)
+        resultsActions.addWidget(self.resultDetailsButton, 0, 2)
+        resultsActions.addWidget(self.openButton, 0, 3)
+        resultsActions.addWidget(self.selectAllResultsButton, 1, 0)
+        resultsActions.addWidget(self.clearResultsSelectionButton, 1, 1)
+        resultsActions.addWidget(self.addAllButton, 1, 2)
+        resultsActions.addWidget(self.downloadAllButton, 1, 3)
+        resultsActions.addWidget(self.retryFailedButton, 2, 0, 1, 4)
+        self.retryFailedButton.hide()
 
         libraryActions = QGridLayout()
         libraryActions.setHorizontalSpacing(8)
         libraryActions.setVerticalSpacing(8)
-        libraryActions.addWidget(self.deleteButton, 0, 0)
-        libraryActions.addWidget(self.selectAllLocalButton, 0, 1)
-        libraryActions.addWidget(self.clearLocalSelectionButton, 1, 0)
-        libraryActions.addWidget(self.openLocalButton, 1, 1)
-        libraryActions.addWidget(self.openLocalFolderButton, 2, 0)
-        libraryActions.addWidget(self.openLibraryButton, 2, 1)
-        libraryActions.addWidget(self.libraryDirButton, 3, 0, 1, 2)
+        libraryActions.addWidget(self.openLocalButton, 0, 0)
+        libraryActions.addWidget(self.openLocalFolderButton, 0, 1)
+        libraryActions.addWidget(self.deleteButton, 0, 2)
+        libraryActions.addWidget(self.inspectLocalButton, 1, 0)
+        libraryActions.addWidget(self.openLibraryButton, 1, 1)
+        libraryActions.addWidget(self.libraryDirButton, 1, 2)
 
         sourcesTab = QWidget()
         sourcesLayout = QVBoxLayout(sourcesTab)
-        sourcesLayout.setContentsMargins(8, 8, 8, 8)
-        sourcesLayout.setSpacing(8)
-        sourcesLayout.addWidget(self.sourceOrderList, 1)
-        sourcesLayout.addLayout(sourceButtons)
-        sourcesLayout.addLayout(discoverRow)
-        sourcesLayout.addLayout(sourceAddRow)
+        sourcesLayout.setContentsMargins(6, 6, 6, 6)
+        sourcesLayout.setSpacing(6)
+
+        sourceIntro = QLabel(
+            "Sources are searched from top to bottom. Disabled or unreachable mirrors are skipped."
+        )
+        sourceIntro.setObjectName("mutedHint")
+        sourceIntro.setWordWrap(True)
+        sourcesLayout.addWidget(sourceIntro)
+
+        self.sourceScroll = QScrollArea()
+        self.sourceScroll.setWidgetResizable(True)
+        self.sourceScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sourceScroll.setFrameShape(QFrame.NoFrame)
+        self.sourceScrollContent = QWidget()
+        sourceScrollLayout = QVBoxLayout(self.sourceScrollContent)
+        sourceScrollLayout.setContentsMargins(6, 6, 6, 6)
+        sourceScrollLayout.setSpacing(10)
+
+        self.priorityGroup = QGroupBox("SEARCH PRIORITY && HEALTH")
+        priorityLayout = QVBoxLayout(self.priorityGroup)
+        priorityLayout.addWidget(self.sourceOrderList)
+        priorityLayout.addLayout(sourceButtons)
+        sourceScrollLayout.addWidget(self.priorityGroup)
+
+        self.discoveryGroup = QGroupBox("DISCOVER MIRRORS")
+        discoveryLayout = QVBoxLayout(self.discoveryGroup)
+        discoveryHelp = QLabel("Find current Doomworld/idgames mirrors. The seed field is optional.")
+        discoveryHelp.setObjectName("mutedHint")
+        discoveryHelp.setWordWrap(True)
+        discoveryLayout.addWidget(discoveryHelp)
+        discoveryLayout.addLayout(discoverRow)
+        sourceScrollLayout.addWidget(self.discoveryGroup)
+
+        self.customGroup = QGroupBox("CUSTOM SOURCES")
+        customLayout = QVBoxLayout(self.customGroup)
+        customHelp = QLabel("Advanced: add one source URL, or a URL | Name | index | parser record.")
+        customHelp.setObjectName("mutedHint")
+        customHelp.setWordWrap(True)
+        customLayout.addWidget(customHelp)
+        customLayout.addLayout(sourceAddRow)
+        sourceScrollLayout.addWidget(self.customGroup)
+        sourceScrollLayout.addStretch(1)
+
+        self.sourceScroll.setWidget(self.sourceScrollContent)
+        sourcesLayout.addWidget(self.sourceScroll, 1)
 
         resultsTab = QWidget()
         resultsLayout = QVBoxLayout(resultsTab)
         resultsLayout.setContentsMargins(8, 8, 8, 8)
         resultsLayout.setSpacing(8)
-        resultsLayout.addWidget(self.resultsTree, 1)
+        self.resultSelectionLabel = QLabel("NO MOD SELECTED — click a row to inspect and install")
+        self.resultSelectionLabel.setObjectName("selectionBanner")
+        self.resultSelectionLabel.setWordWrap(True)
+        resultsLayout.addWidget(self.resultSelectionLabel)
+        self.resultPreview = QPlainTextEdit()
+        self.resultPreview.setReadOnly(True)
+        self.resultPreview.setObjectName("browserPreview")
+        self.resultPreview.setMinimumHeight(72)
+        self.resultPreview.setPlaceholderText("Select a search result to inspect its metadata.")
+        resultSplitter = QSplitter(Qt.Vertical)
+        resultSplitter.setChildrenCollapsible(False)
+        resultSplitter.addWidget(self.resultsTree)
+        resultSplitter.addWidget(self.resultPreview)
+        resultSplitter.setStretchFactor(0, 3)
+        resultSplitter.setStretchFactor(1, 1)
+        resultSplitter.setSizes([360, 150])
+        resultsLayout.addWidget(resultSplitter, 1)
         resultsLayout.addLayout(resultsActions)
 
         libraryTab = QWidget()
@@ -2337,23 +2448,36 @@ class WadFinder(QWidget):
         libraryLayout.setContentsMargins(8, 8, 8, 8)
         libraryLayout.setSpacing(8)
         libraryLayout.addLayout(localFilterRow)
-        libraryLayout.addWidget(self.localTree, 1)
+        self.libraryPreview = QPlainTextEdit()
+        self.libraryPreview.setReadOnly(True)
+        self.libraryPreview.setObjectName("browserPreview")
+        self.libraryPreview.setMinimumHeight(72)
+        self.libraryPreview.setPlaceholderText("Select a library file to inspect its origin and metadata.")
+        librarySplitter = QSplitter(Qt.Vertical)
+        librarySplitter.setChildrenCollapsible(False)
+        librarySplitter.addWidget(self.localTree)
+        librarySplitter.addWidget(self.libraryPreview)
+        librarySplitter.setStretchFactor(0, 3)
+        librarySplitter.setStretchFactor(1, 1)
+        librarySplitter.setSizes([360, 150])
+        libraryLayout.addWidget(librarySplitter, 1)
         libraryLayout.addLayout(libraryActions)
 
         self.libraryDirLabel = QLabel(f"Library folder: {self.library_dir}")
         self.libraryDirLabel.setWordWrap(True)
         libraryLayout.addWidget(self.libraryDirLabel)
 
-        self.browserTabs.addTab(resultsTab, "Results")
-        self.browserTabs.addTab(sourcesTab, "Sources")
-        self.browserTabs.addTab(libraryTab, "Library")
+        self.browserTabs.addTab(resultsTab, "RESULTS [0]")
+        self.browserTabs.addTab(libraryTab, "LIBRARY [0]")
+        self.browserTabs.addTab(sourcesTab, "SOURCES")
+        self.browserTabs.currentChanged.connect(self._on_browser_tab_changed)
         root.addWidget(self.browserTabs, 1)
 
         searchStatusRow = QHBoxLayout()
         self.statusLabel = QLabel("Ready")
         self.statusLabel.setWordWrap(True)
         self.searchProgressBar = QProgressBar()
-        self.searchProgressBar.setTextVisible(False)
+        self.searchProgressBar.setTextVisible(True)
         self.searchProgressBar.setRange(0, 1)
         self.searchProgressBar.setValue(0)
         self.searchProgressBar.hide()
@@ -2371,6 +2495,49 @@ class WadFinder(QWidget):
         self._refresh_retry_state()
         self._set_controls_enabled(True)
         self._on_selection_changed()
+
+    def setCompactMode(self, compact: bool):
+        """Prioritize core search/metadata actions in short windows."""
+        compact = bool(compact)
+        self.browserSubtitle.setVisible(not compact)
+        self.resultsTree.setMinimumHeight(80 if compact else 140)
+        self.localTree.setMinimumHeight(80 if compact else 100)
+        self.resultPreview.setMinimumHeight(64 if compact else 72)
+        self.libraryPreview.setMinimumHeight(64 if compact else 72)
+        self.addButton.setText("GET + QUEUE" if compact else "DOWNLOAD + QUEUE")
+        self.downloadButton.setText("GET ONLY" if compact else "DOWNLOAD ONLY")
+        self.resultDetailsButton.setText("DETAILS" if compact else "View Details")
+        self.openButton.setText("WEB PAGE" if compact else "Open Page")
+        self.resultsTree.setColumnHidden(2, compact)
+        self.resultsTree.setColumnHidden(4, compact)
+
+        for control in (
+            self.selectAllResultsButton,
+            self.clearResultsSelectionButton,
+            self.addAllButton,
+            self.downloadAllButton,
+            self.inspectLocalButton,
+            self.openLibraryButton,
+            self.libraryDirButton,
+        ):
+            control.setVisible(not compact)
+        if compact:
+            self.retryFailedButton.hide()
+        elif self._failed_downloads:
+            self.retryFailedButton.show()
+
+    def _on_browser_mode_toggled(self, expanded: bool):
+        self.expandBrowserButton.setText("BACK TO LAUNCH" if expanded else "EXPAND")
+        self.expandBrowserButton.setToolTip(
+            "Return to the launch setup" if expanded else "Give the mod browser the full application window"
+        )
+        self.browserModeRequested.emit(bool(expanded))
+
+    def _on_browser_tab_changed(self, index: int):
+        # Source administration needs horizontal and vertical room; entering it
+        # automatically uses the browser workspace instead of a cramped pane.
+        if index == 2 and not self.expandBrowserButton.isChecked():
+            self.expandBrowserButton.setChecked(True)
 
     def _load_index_cache(self):
         cache_dir = self.cache_root / "source_index"
@@ -2682,6 +2849,7 @@ class WadFinder(QWidget):
         self.customSourceListReset.setEnabled(enabled)
         self.customSourcePresetButton.setEnabled(enabled)
         self.openLocalButton.setEnabled(enabled and bool(self._selected_local_files()))
+        self.inspectLocalButton.setEnabled(enabled and bool(self._selected_local_files()))
         self.openLocalFolderButton.setEnabled(enabled and bool(self._selected_local_files()))
         self.openLibraryButton.setEnabled(enabled)
         self.libraryDirButton.setEnabled(enabled)
@@ -2701,6 +2869,7 @@ class WadFinder(QWidget):
         if not failed_results:
             self._failed_downloads = []
             self.retryFailedButton.setToolTip("No failed downloads to retry")
+            self.retryFailedButton.hide()
             return
 
         deduped: List[WadBrowserResult] = []
@@ -2715,6 +2884,7 @@ class WadFinder(QWidget):
             deduped.append(result)
 
         self._failed_downloads = deduped
+        self.retryFailedButton.show()
         self._failed_download_auto_add = bool(session.get("auto_add", False))
         self.retryFailedButton.setToolTip(
             f"Retry {len(self._failed_downloads)} failed download(s)"
@@ -2724,7 +2894,19 @@ class WadFinder(QWidget):
         return bool(self._search_sessions or self._download_sessions or self._discover_session is not None)
 
     def _refresh_controls_for_state(self):
-        self._set_controls_enabled(not self._is_busy())
+        if self._download_sessions or self._discover_session is not None:
+            self._set_controls_enabled(False)
+            return
+        if self._search_sessions:
+            self._set_controls_enabled(False)
+            self.clearSearchButton.setEnabled(True)
+            self.clearSearchButton.setText("CANCEL SEARCH")
+            self.resultsTree.setEnabled(self.resultsTree.topLevelItemCount() > 0)
+            self._on_selection_changed()
+            return
+        self.clearSearchButton.setText("RESET")
+        self._set_controls_enabled(True)
+        self._on_selection_changed()
 
     def _set_status(self, text: str):
         self.statusLabel.setText(text)
@@ -3567,13 +3749,25 @@ class WadFinder(QWidget):
         self._set_status(f"Moved source to bottom: {self.searchSources[source_id]['name']}")
 
     def _on_clear_search(self):
+        if self._search_sessions:
+            # Workers are not force-terminated, but advancing the token makes
+            # their late results harmless and immediately restores the UI.
+            self._search_token += 1
+            self._search_sessions.clear()
+            self.searchProgressBar.hide()
+            self._set_status("Search cancelled.")
         self.searchInput.clear()
         self.resultsTree.clear()
         self._rendered_results = []
+        self.browserTabs.setTabText(0, "RESULTS [0]")
         self._clear_search_feedback()
-        self._set_status("Search cleared.")
+        self._refresh_controls_for_state()
+        if not self.statusLabel.text().startswith("Search cancelled"):
+            self._set_status("Search cleared.")
 
     def _on_search(self):
+        if not self.expandBrowserButton.isChecked():
+            self.expandBrowserButton.setChecked(True)
         query = self.searchInput.text().strip().lower()
         source_ids = self._selected_source_ids()
 
@@ -3607,6 +3801,8 @@ class WadFinder(QWidget):
         self._set_status("Searching...")
         self._update_search_feedback(token, in_progress=True)
         self._set_controls_enabled(False)
+        self.clearSearchButton.setEnabled(True)
+        self.clearSearchButton.setText("CANCEL SEARCH")
 
         started = 0
         for source_id in self._search_sessions[token]["sources"]:
@@ -3893,6 +4089,12 @@ class WadFinder(QWidget):
         if not session:
             return
 
+        selected_identities = {
+            _result_identity(payload)
+            for payload in self._selected_search_results()
+            if _result_identity(payload)
+        }
+        self.resultsTree.blockSignals(True)
         self.resultsTree.clear()
         self._rendered_results = []
         source_order = session["sources"]
@@ -3949,7 +4151,16 @@ class WadFinder(QWidget):
                 row.setToolTip(2, details)
                 row.setToolTip(4, details)
             self.resultsTree.addTopLevelItem(row)
+            if _result_identity(item) in selected_identities:
+                row.setSelected(True)
         self._rendered_results = merged
+        if merged and not self.resultsTree.selectedItems():
+            first = self.resultsTree.topLevelItem(0)
+            first.setSelected(True)
+            self.resultsTree.setCurrentItem(first)
+        self.resultsTree.blockSignals(False)
+        self.resultsTree.setEnabled(bool(merged) and not self._download_sessions)
+        self.browserTabs.setTabText(0, f"RESULTS [{len(merged)}]")
         self._on_selection_changed()
 
     def _finalize_search_session(self, token: int):
@@ -4214,30 +4425,110 @@ class WadFinder(QWidget):
         self._set_status(status)
 
     def _on_selection_changed(self):
-        search_count = len(self.resultsTree.selectedItems())
+        selected_remote = self._selected_search_results()
+        search_count = len(selected_remote)
         local_count = len(self.localTree.selectedItems())
         open_enabled = bool(search_count)
-        download_enabled = bool(search_count)
-        add_enabled = bool(search_count or local_count)
+        download_session_active = bool(self._download_sessions)
+        download_enabled = bool(search_count) and not download_session_active
+        add_enabled = bool(search_count or local_count) and not download_session_active
         delete_enabled = bool(local_count)
 
         self.openButton.setEnabled(open_enabled)
         self.resultDetailsButton.setEnabled(open_enabled)
         self.downloadButton.setEnabled(download_enabled)
-        self.downloadAllButton.setEnabled(bool(self._rendered_results))
+        self.downloadAllButton.setEnabled(bool(self._rendered_results) and not download_session_active)
         self.selectAllResultsButton.setEnabled(self.resultsTree.topLevelItemCount() > 0)
         self.clearResultsSelectionButton.setEnabled(len(self.resultsTree.selectedItems()) > 0)
         self.selectAllLocalButton.setEnabled(self.localTree.topLevelItemCount() > 0)
         self.clearLocalSelectionButton.setEnabled(len(self.localTree.selectedItems()) > 0)
         self.addButton.setEnabled(add_enabled)
-        self.addAllButton.setEnabled(bool(self._rendered_results))
+        self.addAllButton.setEnabled(bool(self._rendered_results) and not download_session_active)
         self.deleteButton.setEnabled(delete_enabled)
         self.openLocalButton.setEnabled(delete_enabled)
+        self.inspectLocalButton.setEnabled(delete_enabled)
         self.openLocalFolderButton.setEnabled(delete_enabled)
 
+        if search_count == 1:
+            result = selected_remote[0]
+            self.resultSelectionLabel.setText(
+                f"SELECTED: {result.title}  //  choose DOWNLOAD + QUEUE or double-click the row"
+            )
+            self.resultSelectionLabel.setProperty("active", True)
+        elif search_count > 1:
+            self.resultSelectionLabel.setText(
+                f"SELECTED: {search_count} MODS  //  DOWNLOAD + QUEUE installs them in displayed order"
+            )
+            self.resultSelectionLabel.setProperty("active", True)
+        else:
+            self.resultSelectionLabel.setText("NO MOD SELECTED — click a row to inspect and install")
+            self.resultSelectionLabel.setProperty("active", False)
+        self.resultSelectionLabel.style().unpolish(self.resultSelectionLabel)
+        self.resultSelectionLabel.style().polish(self.resultSelectionLabel)
+
+        self._update_selection_previews()
+
         # Keep search button available if query is empty or results are visible.
-        if self.searchInput.text().strip():
+        if self.searchInput.text().strip() and not self._search_sessions and not self._download_sessions:
             self.searchButton.setEnabled(True)
+
+    def _update_selection_previews(self):
+        if not hasattr(self, "resultPreview") or not hasattr(self, "libraryPreview"):
+            return
+        remote = self._selected_search_results()
+        if not remote:
+            self.resultPreview.setPlainText(
+                "NO REMOTE MOD SELECTED\n\n"
+                "Select a result to review its description, source, archive path, and size.\n"
+                "Use DOWNLOAD + QUEUE to install it and add it to the current loadout."
+            )
+        elif len(remote) > 1:
+            known_size = sum(item.size_bytes for item in remote if item.size_bytes > 0)
+            self.resultPreview.setPlainText(
+                f"BATCH SELECTED: {len(remote)} MODS\n"
+                f"KNOWN DOWNLOAD SIZE: {_human_size(known_size)}\n\n"
+                + "\n".join(f"[{item.source_name}] {item.title}" for item in remote[:18])
+                + (f"\n... +{len(remote) - 18} more" if len(remote) > 18 else "")
+            )
+        else:
+            self.resultPreview.setPlainText(self._result_details_text(remote[0]))
+
+        local = self._selected_local_files()
+        row_by_path = {str(row.get("path", "")): row for row in self._library_rows}
+        if not local:
+            self.libraryPreview.setPlainText(
+                "NO LIBRARY MOD SELECTED\n\n"
+                "Downloaded files live here independently of the current launch loadout.\n"
+                "QUEUE SELECTED adds a file to the loadout without copying it again."
+            )
+        elif len(local) > 1:
+            total_size = sum(int(row_by_path.get(path, {}).get("size", 0)) for path in local)
+            self.libraryPreview.setPlainText(
+                f"LIBRARY BATCH: {len(local)} MODS\n"
+                f"DISK SPACE: {_human_size(total_size)}\n\n"
+                + "\n".join(Path(path).name for path in local[:18])
+                + (f"\n... +{len(local) - 18} more" if len(local) > 18 else "")
+            )
+        else:
+            row = row_by_path.get(local[0], {})
+            details = _normalize_metadata_text(row.get("description", ""), row.get("metadata_text", ""))
+            self.libraryPreview.setPlainText(
+                f"TITLE       : {row.get('title') or Path(local[0]).name}\n"
+                f"FILE        : {Path(local[0]).name}\n"
+                f"SIZE        : {row.get('size_text', '—')}\n"
+                f"SOURCE      : {row.get('source', 'local')}\n"
+                f"INSTALLED   : {row.get('installed_text', 'unknown')}\n"
+                f"REMOTE PATH : {row.get('source_path', '-')}\n"
+                f"LOCAL PATH  : {local[0]}\n\n"
+                f"{details or 'No preserved description is available for this local file.'}"
+            )
+
+        # setPlainText can leave a newly resized editor scrolled to its final
+        # line; metadata summaries should always open at their title.
+        self.resultPreview.verticalScrollBar().setValue(0)
+        self.libraryPreview.verticalScrollBar().setValue(0)
+        self.resultPreview.moveCursor(QTextCursor.Start)
+        self.libraryPreview.moveCursor(QTextCursor.Start)
 
     def _selected_search_results(self) -> List[WadBrowserResult]:
         ordered = []
@@ -4254,11 +4545,12 @@ class WadFinder(QWidget):
         if not details:
             details = "No description available."
         return (
-            f"Title: {result.title}\n"
-            f"Source: {result.source_name}\n"
-            f"Size: {_human_size(result.size_bytes)}\n"
-            f"Path: {result.remote_path}\n"
-            f"Download: {result.download_url}\n\n"
+            f"TITLE       : {result.title}\n"
+            f"SOURCE      : {result.source_name}\n"
+            f"SIZE        : {_human_size(result.size_bytes)}\n"
+            f"ARCHIVE PATH: {result.remote_path}\n"
+            f"DOWNLOAD URL: {result.download_url}\n\n"
+            f"DESCRIPTION\n{'-' * 54}\n"
             f"{details}"
         )
 
@@ -4390,6 +4682,16 @@ class WadFinder(QWidget):
         self._start_download_session(selected_results, auto_add=False)
 
     def _safe_library_path(self, result: WadBrowserResult) -> Path:
+        remote_identity = _normalize_remote_path(result.remote_path).lower()
+        if remote_identity:
+            for candidate in self.library_dir.glob("*"):
+                if not candidate.is_file() or candidate.suffix.lower() not in DEFAULT_EXTENSIONS:
+                    continue
+                metadata = self._read_metadata(str(candidate))
+                metadata_remote = _normalize_remote_path(str(metadata.get("remote_path", ""))).lower()
+                metadata_source = str(metadata.get("source_id", "")).lower()
+                if metadata_remote == remote_identity and metadata_source == result.source_id.lower():
+                    return candidate
         return _safe_library_name(result.remote_path, result.source_id, self.library_dir)
 
     def _metadata_path(self, destination: str) -> Path:
@@ -4410,7 +4712,10 @@ class WadFinder(QWidget):
             "size_bytes": result.size_bytes,
         }
         try:
-            self._metadata_path(destination).write_text(json.dumps(payload), encoding="utf-8")
+            metadata_path = self._metadata_path(destination)
+            temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temporary.replace(metadata_path)
         except OSError:
             pass
 
@@ -4436,6 +4741,11 @@ class WadFinder(QWidget):
                 size = 0
 
             metadata = self._read_metadata(str(path))
+            downloaded_at = metadata.get("downloaded_at")
+            try:
+                installed_text = time.strftime("%Y-%m-%d", time.localtime(int(downloaded_at)))
+            except (TypeError, ValueError, OSError, OverflowError):
+                installed_text = "local"
             rows.append(
                 {
                     "path": str(path),
@@ -4448,6 +4758,8 @@ class WadFinder(QWidget):
                     "title": metadata.get("title") or path.name,
                     "description": metadata.get("description") or "",
                     "metadata_text": metadata.get("metadata_text") or "",
+                    "downloaded_at": downloaded_at or 0,
+                    "installed_text": installed_text,
                 }
             )
 
@@ -4479,6 +4791,7 @@ class WadFinder(QWidget):
                 row.get("name", ""),
                 row.get("size_text", "—"),
                 row.get("source", "local"),
+                row.get("installed_text", "local"),
                 row.get("source_path", "-"),
             ])
             file_path = row.get("path", "")
@@ -4487,10 +4800,11 @@ class WadFinder(QWidget):
             details = _normalize_metadata_text(row.get("description", ""), row.get("metadata_text", ""))
             if details:
                 item.setToolTip(2, details)
-                item.setToolTip(3, details)
+                item.setToolTip(4, details)
             if file_path in selected:
                 item.setSelected(True)
             self.localTree.addTopLevelItem(item)
+        self.browserTabs.setTabText(1, f"LIBRARY [{len(rows)}]")
 
     def _start_download_session(self, results: List[WadBrowserResult], auto_add: bool):
         if not results:
@@ -4520,11 +4834,17 @@ class WadFinder(QWidget):
             "by_url": by_url,
             "ordered_urls": ordered_urls,
             "path_by_url": {},
+            "progress_by_url": {},
+            "total_by_url": {},
         }
         self._failed_downloads = []
         self._refresh_retry_state()
         self._set_controls_enabled(False)
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.searchProgressBar.setRange(0, 100)
+        self.searchProgressBar.setValue(0)
+        self.searchProgressBar.setFormat(f"DOWNLOADING 0/{len(deduped)}  %p%")
+        self.searchProgressBar.show()
+        self._set_status(f"Preparing {len(deduped)} download(s)...")
 
         for result in deduped:
             target = self._safe_library_path(result)
@@ -4547,19 +4867,36 @@ class WadFinder(QWidget):
             self._finish_download_session(token)
 
     def _on_download_progress(self, token: int, received: int, total: int, url: str):
-        if token not in self._download_sessions:
+        session = self._download_sessions.get(token)
+        if session is None:
             return
+        session["progress_by_url"][url] = received
+        session["total_by_url"][url] = total
+        known_total = sum(value for value in session["total_by_url"].values() if value > 0)
+        known_received = sum(
+            min(session["progress_by_url"].get(key, 0), size)
+            for key, size in session["total_by_url"].items()
+            if size > 0
+        )
+        percent = int((known_received / known_total) * 100) if known_total else 0
+        completed = len(session.get("paths", []))
+        overall = len(session.get("ordered_urls", []))
+        self.searchProgressBar.setValue(percent)
+        self.searchProgressBar.setFormat(f"DOWNLOADING {completed}/{overall}  %p%")
         if total:
-            self._set_status(f"Downloading ({Path(url).name}) {received}/{total} bytes ({received / total:.0%})")
+            self._set_status(
+                f"Receiving {Path(urlparse(url).path).name or 'mod'} — "
+                f"{_human_size(received)} / {_human_size(total)} ({received / total:.0%})"
+            )
 
     def _finish_download_session(self, session_id: int):
         payload = self._download_sessions.pop(session_id, None)
         if payload is None:
             return
 
-        QApplication.restoreOverrideCursor()
         self._refresh_controls_for_state()
         self._refresh_local_library()
+        self.searchProgressBar.hide()
 
         ordered_urls = payload.get("ordered_urls", [])
         path_by_url = payload.get("path_by_url", {})

@@ -18,9 +18,9 @@ class OpenPWadAction(QAction):
         options |= QFileDialog.DontUseNativeDialog
         filenames, _ = QFileDialog.getOpenFileNames(
             self.widget,
-            "Select PWAD files",
+            "Add mods to the loadout",
             self.config.get("pwadDir"),
-            "WAD files (*.wad *.pk3)",
+            "Doom mods (*.wad *.pk3 *.ipk3 *.pk7 *.pke *.zip);;WAD files (*.wad);;Packages (*.pk3 *.ipk3 *.pk7 *.pke *.zip);;All files (*)",
             options=options,
         )
         if filenames:

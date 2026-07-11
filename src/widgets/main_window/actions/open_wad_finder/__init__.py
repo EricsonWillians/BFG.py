@@ -1,12 +1,12 @@
-from PyQt5.QtWidgets import QAction, qApp
+from PyQt5.QtWidgets import QAction
 
 
 class OpenWadFinder(QAction):
 
     def __init__(self, widget, wadFinder):
-        super().__init__('&Wad Finder', widget, checkable=True)
-        self.setShortcut('Ctrl+W')
-        self.setStatusTip('Open the wad finder')
+        super().__init__('&Mod Browser', widget, checkable=True)
+        self.setShortcut('Ctrl+B')
+        self.setStatusTip('Show or hide the mod browser')
         self.wadFinder = wadFinder
         self.triggered.connect(self.setVisible)
 

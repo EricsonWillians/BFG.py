@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -37,11 +38,12 @@ class ModPanel(QGroupBox):
     """
 
     addRequested = pyqtSignal()
+    browseRequested = pyqtSignal()
     selectedPathsChanged = pyqtSignal(list)
     modsChanged = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("Mods", parent)
+        super().__init__("3. MOD LOADOUT", parent)
         self._all_items = []
 
         root = QVBoxLayout()
@@ -58,14 +60,24 @@ class ModPanel(QGroupBox):
         header.addWidget(self._countLabel)
         root.addLayout(header)
 
+        self._orderHint = QLabel("TOP LOADS FIRST  //  DROP FILES HERE  //  DEL REMOVES")
+        self._orderHint.setObjectName("mutedHint")
+        root.addWidget(self._orderHint)
+
         toolbar = QGridLayout()
         toolbar.setHorizontalSpacing(6)
         toolbar.setVerticalSpacing(6)
-        self.addButton = QPushButton("Add Mod")
+        self.addButton = QPushButton("+ ADD FILES")
+        self.addButton.setObjectName("primaryButton")
         self.addButton.setToolTip("Open file dialog to add .wad/.pk3 files")
         self.addButton.clicked.connect(self.addRequested.emit)
 
-        self.removeButton = QPushButton("Remove")
+        self.browseButton = QPushButton("FIND ONLINE")
+        self.browseButton.setObjectName("primaryButton")
+        self.browseButton.setToolTip("Search idgames sources and download mods into your library")
+        self.browseButton.clicked.connect(self.browseRequested.emit)
+
+        self.removeButton = QPushButton("REMOVE")
         self.removeButton.setToolTip("Remove selected mods")
         self.removeButton.clicked.connect(self.removeSelected)
 
@@ -73,19 +85,27 @@ class ModPanel(QGroupBox):
         self.pwadList.setMinimumHeight(140)
         self.pwadList.itemSelectionChanged.connect(self._handle_selection_change)
         self.pwadList.orderChanged.connect(self._on_model_changed)
+        self.pwadList.filesDropped.connect(self.addMods)
 
-        self.moveUpButton = QPushButton("Move Up")
+        self.moveUpButton = QPushButton("MOVE UP")
         self.moveUpButton.setToolTip("Move selected mods up in launch order")
         self.moveUpButton.clicked.connect(self.pwadList.moveUp)
 
-        self.moveDownButton = QPushButton("Move Down")
+        self.moveDownButton = QPushButton("MOVE DOWN")
         self.moveDownButton.setToolTip("Move selected mods down in launch order")
         self.moveDownButton.clicked.connect(self.pwadList.moveDown)
 
+        self.clearButton = QPushButton("CLEAR LOADOUT")
+        self.clearButton.setObjectName("dangerButton")
+        self.clearButton.setToolTip("Remove every mod from this launch; downloaded files stay in the library")
+        self.clearButton.clicked.connect(self.clearMods)
+
         toolbar.addWidget(self.addButton, 0, 0)
-        toolbar.addWidget(self.removeButton, 0, 1)
-        toolbar.addWidget(self.moveUpButton, 1, 0)
-        toolbar.addWidget(self.moveDownButton, 1, 1)
+        toolbar.addWidget(self.browseButton, 0, 1)
+        toolbar.addWidget(self.removeButton, 1, 0)
+        toolbar.addWidget(self.clearButton, 1, 1)
+        toolbar.addWidget(self.moveUpButton, 2, 0)
+        toolbar.addWidget(self.moveDownButton, 2, 1)
         root.addLayout(toolbar)
 
         self.pwadInfo = PWadInfo()
@@ -104,7 +124,7 @@ class ModPanel(QGroupBox):
         self._all_items = []
         self.pwadList.clear()
         for path in paths:
-            if self.pwadList.addWad(path):
+            if self.pwadList.addWad(path, emit_change=False):
                 self._all_items.append(path)
         self._refresh_count()
         self._apply_filter()
@@ -114,12 +134,11 @@ class ModPanel(QGroupBox):
     def addMods(self, paths: List[str]):
         added = 0
         for path in paths:
-            if self.pwadList.addWad(path):
+            if self.pwadList.addWad(path, emit_change=False):
                 self._all_items.append(path)
                 added += 1
         if added:
             self._refresh_count()
-            self._emit_selection()
             self._on_model_changed()
 
     def selectedPaths(self) -> List[str]:
@@ -165,12 +184,31 @@ class ModPanel(QGroupBox):
             self._emit_selection()
             self._on_model_changed()
 
+    def clearMods(self):
+        total = self.pwadList.topLevelItemCount()
+        if not total:
+            return
+        response = QMessageBox.question(
+            self,
+            "Clear Mod Loadout",
+            f"Remove all {total} mod(s) from this launch?\n\nDownloaded files will remain in your library.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response != QMessageBox.Yes:
+            return
+        self._all_items = []
+        self.pwadList.clear()
+        self._handle_selection_change()
+        self._on_model_changed()
+
     def _handle_selection_change(self):
         selected = len(self.pwadList.selectedItems())
         has_selection = selected > 0
         self.removeButton.setEnabled(has_selection)
         self.moveUpButton.setEnabled(has_selection)
         self.moveDownButton.setEnabled(has_selection)
+        self.clearButton.setEnabled(self.pwadList.topLevelItemCount() > 0)
         self.selectedPathsChanged.emit(self.selectedPaths())
         self.pwadInfo.showInfo(self.selectedPaths())
 
@@ -191,7 +229,18 @@ class ModPanel(QGroupBox):
             if not item.isHidden():
                 visible += 1
         total = self.pwadList.topLevelItemCount()
-        self._countLabel.setText(f"{total} mods • {visible} visible")
+        missing = sum(
+            1
+            for item in self.pwadList.getItems()
+            if item.text(4) == "MISSING"
+        )
+        status = f"{total} MOD{'S' if total != 1 else ''}"
+        if visible != total:
+            status += f" / {visible} SHOWN"
+        if missing:
+            status += f" / {missing} MISSING"
+        self._countLabel.setText(status)
+        self.clearButton.setEnabled(total > 0)
 
     def _apply_filter(self):
         query = self._searchInput.text().strip()

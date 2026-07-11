@@ -1,13 +1,13 @@
-from PyQt5.QtWidgets import QAction, qApp
+from PyQt5.QtWidgets import QAction
 import webbrowser
 
 
 class OpenWadRepository(QAction):
 
     def __init__(self, widget):
-        super().__init__('&Download wads', widget)
-        self.setShortcut('Ctrl+W')
-        self.setStatusTip('Open the doom world wad repository')
+        super().__init__('Open &Doomworld idgames', widget)
+        self.setShortcut('Ctrl+Shift+B')
+        self.setStatusTip('Open Doomworld idgames in the web browser')
         self.triggered.connect(self.openLink)
 
     def openLink(self):

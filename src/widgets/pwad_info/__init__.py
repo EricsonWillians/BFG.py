@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import struct
 import tempfile
 import zipfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import QGroupBox, QPlainTextEdit, QVBoxLayout
 
 from src.config import LauncherConfig
@@ -40,6 +42,24 @@ def _state_label(state: str) -> str:
     return "UNKNOWN"
 
 
+def _human_size(size: int) -> str:
+    value = float(max(0, size))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit in {"B", "KB"} else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _sidecar_metadata(path: str) -> Dict:
+    candidate = Path(path).with_suffix(Path(path).suffix + ".bfg-meta.json")
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _wad_details(path: str) -> str:
     info = []
     try:
@@ -49,17 +69,24 @@ def _wad_details(path: str) -> str:
                 return ''
             num = struct.unpack('<I', fh.read(4))[0]
             offset = struct.unpack('<I', fh.read(4))[0]
-            info.append(f'Type: {ident}')
-            info.append(f'Lumps: {num}')
+            info.append(f'Format       : {ident}')
+            info.append(f'Lump count   : {num:,}')
             fh.seek(offset)
-            for i in range(min(num, 20)):
+            names = []
+            maps = []
+            for i in range(num):
                 pos, size = struct.unpack('<II', fh.read(8))
                 name = fh.read(8).decode('ascii', 'ignore').rstrip('\0')
-                info.append(f' {i:03d}: {name} ({size} bytes)')
-        if num > 20:
-            info.append(' ...')
-    except OSError:
-        pass
+                if len(names) < 12:
+                    names.append(name)
+                if re.match(r"^(E\dM\d|MAP\d\d)$", name, re.IGNORECASE):
+                    maps.append(name)
+            info.append(f'Maps         : {", ".join(maps[:16]) if maps else "none detected"}')
+            if len(maps) > 16:
+                info[-1] += f" (+{len(maps) - 16} more)"
+            info.append(f'First lumps  : {", ".join(names)}')
+    except (OSError, struct.error):
+        return "File structure could not be read."
     return '\n'.join(info)
 
 
@@ -67,34 +94,68 @@ def _pk3_details(path: str) -> str:
     info = []
     try:
         with zipfile.ZipFile(path) as zf:
-            info.append(f'ZIP entries: {len(zf.infolist())}')
-            for zi in zf.infolist()[:20]:
-                info.append(f' {zi.filename} ({zi.file_size} bytes)')
-            if len(zf.infolist()) > 20:
-                info.append(' ...')
+            entries = zf.infolist()
+            names = [zi.filename for zi in entries if not zi.is_dir()]
+            maps = sorted({
+                match.group(1).upper()
+                for name in names
+                for match in [re.search(r"(?:^|/)(E\dM\d|MAP\d\d)(?:\.|/|$)", name, re.IGNORECASE)]
+                if match
+            })
+            info.append(f'Format       : ZIP package')
+            info.append(f'File count   : {len(names):,}')
+            info.append(f'Maps         : {", ".join(maps[:16]) if maps else "none detected"}')
+            info.append(f'Contents     : {", ".join(names[:10])}')
+            if len(names) > 10:
+                info[-1] += f" (+{len(names) - 10} more)"
     except (OSError, zipfile.BadZipFile):
         pass
     return '\n'.join(info)
 
 
 def describe(path: str) -> str:
-    lines = [f'Path: {path}']
+    target = Path(path)
+    lines = [
+        f'FILE         : {target.name}',
+        f'LOCATION     : {target.parent}',
+    ]
     try:
         stat = os.stat(path)
-        lines.append(f'Size: {stat.st_size} bytes')
+        lines.append(f'SIZE         : {_human_size(stat.st_size)} ({stat.st_size:,} bytes)')
         mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
-        lines.append(f'Modified: {mtime:%Y-%m-%d %H:%M:%S}')
+        lines.append(f'MODIFIED     : {mtime:%Y-%m-%d %H:%M}')
     except OSError:
-        lines.append('Missing file')
+        lines.append('STATUS       : MISSING FILE')
+
+    remote = _sidecar_metadata(path)
+    if remote:
+        downloaded_at = remote.get("downloaded_at")
+        downloaded = ""
+        try:
+            downloaded = datetime.datetime.fromtimestamp(int(downloaded_at)).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OSError):
+            pass
+        lines.extend([
+            "",
+            "-- IDGAMES RECORD --------------------------------",
+            f"TITLE        : {remote.get('title') or target.name}",
+            f"SOURCE       : {remote.get('source_name') or remote.get('source_id') or 'unknown'}",
+            f"REMOTE PATH  : {remote.get('remote_path') or 'unknown'}",
+        ])
+        if downloaded:
+            lines.append(f"DOWNLOADED   : {downloaded}")
+        description = str(remote.get("description") or remote.get("metadata_text") or "").strip()
+        if description:
+            lines.extend(["", "DESCRIPTION", description])
 
     if path.lower().endswith('.pk3') or zipfile.is_zipfile(path):
         detail = _pk3_details(path)
         if detail:
-            lines.append(detail)
+            lines.extend(["", "-- PACKAGE CONTENTS ------------------------------", detail])
     else:
         detail = _wad_details(path)
         if detail:
-            lines.append(detail)
+            lines.extend(["", "-- WAD DIRECTORY ---------------------------------", detail])
     return '\n'.join(lines)
 
 
@@ -303,7 +364,7 @@ class ModMetadataService(QObject):
 class PWadInfo(QGroupBox):
     """Widget showing detailed information about selected mods."""
 
-    def __init__(self, title='📁 Mod Info'):
+    def __init__(self, title='MOD INTELLIGENCE'):
         super().__init__(title)
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -343,7 +404,11 @@ class PWadInfo(QGroupBox):
         self._last_state = {}
 
         if not self._last_paths:
-            self.text.setPlainText("Select a mod to inspect file details")
+            self.text.setPlainText(
+                "SELECT A MOD TO INSPECT\n\n"
+                "BFG will show file health, map/package contents, and preserved\n"
+                "idgames provenance for mods downloaded through the browser."
+            )
             return
 
         pending = []
@@ -402,7 +467,11 @@ class PWadInfo(QGroupBox):
             else:
                 blocks.append(f"[{_state_label('error')}] {path}\nUnable to read metadata.")
 
-        text = "\n\n".join(blocks)
+        selected_count = len(self._last_paths)
+        heading = f"SELECTED: {selected_count} MOD{'S' if selected_count != 1 else ''}\n" + ("=" * 54)
+        text = heading + "\n\n" + "\n\n".join(blocks)
         if done and total:
             text += f"\n\nProgress: {done}/{total}"
         self.text.setPlainText(text)
+        self.text.verticalScrollBar().setValue(0)
+        self.text.moveCursor(QTextCursor.Start)

@@ -14,8 +14,10 @@ from PyQt5.QtWidgets import (
     QApplication,
     QDesktopWidget,
     QErrorMessage,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QFileDialog,
@@ -104,6 +106,16 @@ class MainWindow(QMainWindow):
         self.mainLayout.setSpacing(12)
         self.mainLayout.setContentsMargins(12, 12, 12, 12)
 
+        self.missionHeader = QLabel("BFG.PY // MISSION CONTROL")
+        self.missionHeader.setObjectName("terminalTitle")
+        self.missionHeader.setFrameStyle(QFrame.Box | QFrame.Raised)
+        self.missionHeader.setAlignment(Qt.AlignCenter)
+
+        self.readinessLabel = QLabel("SYSTEM CHECK PENDING...")
+        self.readinessLabel.setObjectName("readinessStrip")
+        self.readinessLabel.setAlignment(Qt.AlignCenter)
+        self.readinessLabel.setWordWrap(True)
+
         self.topConfigPanel = QWidget()
         self.topConfigPanel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.topConfigLayout = QHBoxLayout(self.topConfigPanel)
@@ -126,6 +138,13 @@ class MainWindow(QMainWindow):
         self.leftScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.leftScroll.setWidget(self.leftPanel)
 
+        self.leftColumn = QWidget()
+        self.leftColumn.setMinimumWidth(320)
+        self.leftColumnLayout = QVBoxLayout(self.leftColumn)
+        self.leftColumnLayout.setSpacing(8)
+        self.leftColumnLayout.setContentsMargins(0, 0, 0, 0)
+        self.leftColumnLayout.addWidget(self.leftScroll, 1)
+
         self.rightPanel = QWidget()
         self.rightPanel.setMinimumWidth(320)
         self.rightPanel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -133,10 +152,12 @@ class MainWindow(QMainWindow):
         self.rightLayout.setSpacing(12)
         self.rightLayout.setContentsMargins(0, 0, 0, 0)
 
-        self.mainSplitter.addWidget(self.leftScroll)
+        self.mainSplitter.addWidget(self.leftColumn)
         self.mainSplitter.addWidget(self.rightPanel)
         self.mainSplitter.setStretchFactor(0, 2)
         self.mainSplitter.setStretchFactor(1, 3)
+        self.mainLayout.addWidget(self.missionHeader)
+        self.mainLayout.addWidget(self.readinessLabel)
         self.mainLayout.addWidget(self.topConfigPanel)
         self.mainLayout.addWidget(self.mainSplitter, 1)
 
@@ -156,12 +177,13 @@ class MainWindow(QMainWindow):
         self.wadFinder.addRequested.connect(self._on_browser_add)
         self.wadFinder.removedRequested.connect(self._on_browser_removed)
         self.wadFinder.statusChanged.connect(self.statusBar().showMessage)
+        self.wadFinder.browserModeRequested.connect(self._set_browser_expanded)
 
     def addWidgets(self):
         self.config = self.config.normalized()
         self.config.render_profile = self.config.render_profile
 
-        self.sourcePortGroup = QGroupBox("Source Port")
+        self.sourcePortGroup = QGroupBox("1. ENGINE / SOURCE PORT")
         sourcePortLayout = QVBoxLayout(self.sourcePortGroup)
 
         self.sourcePortPathInput = PathInput()
@@ -170,6 +192,7 @@ class MainWindow(QMainWindow):
         self.sourcePortPathInput.setText(self.config.source_port_path)
         self.sourcePortPathInput.setCursorPosition(0)
         self.sourcePortPathInput.installEventFilter(self)
+        self.sourcePortPathInput.textChanged.connect(self._update_readiness)
 
         self.sourcePortBrowseButton = QPushButton('Browse...')
         self.sourcePortBrowseButton.setToolTip('Open a file browser to select the source port executable')
@@ -193,7 +216,7 @@ class MainWindow(QMainWindow):
         sourcePortActionsLayout.addStretch(1)
         sourcePortLayout.addLayout(sourcePortActionsLayout)
 
-        self.iwadGroup = QGroupBox("IWAD (Main Game)")
+        self.iwadGroup = QGroupBox("2. BASE GAME / IWAD")
         iwadLayout = QVBoxLayout(self.iwadGroup)
 
         self.iwadInput = IWadInput()
@@ -201,6 +224,7 @@ class MainWindow(QMainWindow):
         self.iwadInput.setText(self.config.iwad_path)
         self.iwadInput.setCursorPosition(0)
         self.iwadInput.installEventFilter(self)
+        self.iwadInput.textChanged.connect(self._update_readiness)
 
         self.iwadBrowseButton = QPushButton('Browse...')
         self.iwadBrowseButton.setToolTip('Select an IWAD file')
@@ -214,10 +238,10 @@ class MainWindow(QMainWindow):
         self.modPanel = ModPanel(self)
         self.modPanel.setMods(self.config.pwad_paths)
         self.modPanel.addRequested.connect(self.openPWadAction._open)
+        self.modPanel.browseRequested.connect(self._focus_mod_browser)
         self.modPanel.modsChanged.connect(self.saveConfig)
-        self.modPanel.selectedPathsChanged.connect(self.updatePWadInfo)
 
-        self.optionsGroup = QGroupBox("Extra Options")
+        self.optionsGroup = QGroupBox("4. LAUNCH OPTIONS")
         optionsLayout = QVBoxLayout(self.optionsGroup)
 
         self.extraOptionsInput = QLineEdit()
@@ -235,8 +259,8 @@ class MainWindow(QMainWindow):
             skull_gif_path="assets/lost_soul.gif",
             animated_background=self.config.animated_background,
         )
-        self.lostSoulWidget.setMinimumSize(180, 140)
-        self.lostSoulWidget.setMaximumHeight(160)
+        self.lostSoulWidget.setMinimumSize(160, 72)
+        self.lostSoulWidget.setMaximumHeight(96)
         self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.logWindow = LogWindow(self)
@@ -248,6 +272,7 @@ class MainWindow(QMainWindow):
         self.installResponsiveLayout()
         self.set_render_profile(self.config.render_profile)
         self.applyWarningsOrErrors()
+        self._update_readiness()
 
     def createMenu(self):
         self.openSourcePortAction = OpenSourcePortAction(
@@ -300,9 +325,9 @@ class MainWindow(QMainWindow):
         self.topConfigLayout.addWidget(self.sourcePortGroup, 3)
         self.topConfigLayout.addWidget(self.iwadGroup, 2)
         self.leftLayout.addWidget(self.modPanel, 1)
-        self.leftLayout.addWidget(self.optionsGroup)
-        self.leftLayout.addWidget(self.launchButton)
         self.leftLayout.addStretch(0)
+        self.leftColumnLayout.addWidget(self.optionsGroup)
+        self.leftColumnLayout.addWidget(self.launchButton)
 
         self.rightSplitter = QSplitter(Qt.Vertical)
         self.rightSplitter.setChildrenCollapsible(False)
@@ -312,7 +337,7 @@ class MainWindow(QMainWindow):
         self.rightSplitter.setStretchFactor(1, 5)
         self.rightLayout.addWidget(self.rightSplitter, 1)
         self.mainSplitter.setSizes([360, max(520, self.width() - 360)])
-        self.rightSplitter.setSizes([150, max(460, self.height() - 220)])
+        self.rightSplitter.setSizes([86, max(520, self.height() - 150)])
 
     def eventFilter(self, source, event):
         if (
@@ -457,6 +482,39 @@ class MainWindow(QMainWindow):
     def _on_browser_add(self, paths: list):
         self.modPanel.addMods(paths)
         self.saveConfig()
+        self._update_readiness()
+
+    def _focus_mod_browser(self):
+        self.wadFinder.show()
+        self.wadFinder.browserTabs.setCurrentIndex(0)
+        if not self.wadFinder.expandBrowserButton.isChecked():
+            self.wadFinder.expandBrowserButton.setChecked(True)
+        self.wadFinder.searchInput.setFocus()
+        self.wadFinder.searchInput.selectAll()
+        self.statusBar().showMessage("Search the network, inspect a result, then choose DOWNLOAD + QUEUE.", 5000)
+
+    def _set_browser_expanded(self, expanded: bool):
+        expanded = bool(expanded)
+        self.topConfigPanel.setVisible(not expanded)
+        self.readinessLabel.setVisible(not expanded)
+        self.leftColumn.setVisible(not expanded)
+        if expanded:
+            self.lostSoulWidget.setPlaybackPaused(True)
+            self.lostSoulWidget.hide()
+            self.wadFinder.setCompactMode(False)
+            self.mainSplitter.setSizes([0, max(900, self.width())])
+            self.statusBar().showMessage(
+                "Browser expanded — select a result, inspect its metadata, then DOWNLOAD + QUEUE.",
+                5000,
+            )
+            return
+
+        compact = self.height() < 760
+        self.lostSoulWidget.setPlaybackPaused(compact)
+        self.lostSoulWidget.setVisible(not compact)
+        self.wadFinder.setCompactMode(compact)
+        self.mainSplitter.setSizes([360, max(520, self.width() - 360)])
+        self.statusBar().showMessage("Returned to launch setup.", 3000)
 
     def _on_browser_removed(self, paths: list[str]):
         if not paths:
@@ -510,7 +568,10 @@ class MainWindow(QMainWindow):
                 ],
             )
             self.runtime.config.browser_sources = self.config.browser_sources
-            self.saveConfig()
+            # WadFinder emits its normalized source state during construction,
+            # before the remaining form controls exist.
+            if hasattr(self, "sourcePortPathInput"):
+                self.saveConfig()
         except Exception:
             self.statusBar().showMessage("Failed to sync browser source settings.", 3000)
 
@@ -573,6 +634,31 @@ class MainWindow(QMainWindow):
         perf_settings.apply_profile(self.config.render_profile)
         self._maybe_auto_detect_iwad(show_status=False)
         self.runtime.config = self.config
+        self._update_readiness()
+
+    def _update_readiness(self):
+        if not hasattr(self, "readinessLabel") or not hasattr(self, "sourcePortPathInput"):
+            return
+        source_text = self.sourcePortPathInput.text().strip()
+        source, _ = resolve_source_port(source_text, discover=False) if source_text else (None, None)
+        iwad_text = self.iwadInput.text().strip() if hasattr(self, "iwadInput") else ""
+        iwad_ready = bool(iwad_text and Path(iwad_text).expanduser().is_file())
+        mod_paths = self.modPanel.allPaths() if hasattr(self, "modPanel") else []
+        missing_mods = sum(1 for path in mod_paths if not Path(path).expanduser().is_file())
+
+        engine = "OK" if source else "NEEDS SETUP"
+        base = "OK" if iwad_ready else "NEEDS IWAD"
+        mods = f"{len(mod_paths)} QUEUED"
+        if missing_mods:
+            mods += f" / {missing_mods} MISSING"
+        ready = bool(source and iwad_ready and not missing_mods)
+        prompt = "READY TO UNLEASH" if ready else "COMPLETE RED ITEMS TO LAUNCH"
+        self.readinessLabel.setText(
+            f"ENGINE [{engine}]   //   BASE GAME [{base}]   //   MODS [{mods}]   //   {prompt}"
+        )
+        self.readinessLabel.setProperty("ready", ready)
+        self.readinessLabel.style().unpolish(self.readinessLabel)
+        self.readinessLabel.style().polish(self.readinessLabel)
 
     def _maybe_auto_detect_iwad(self, *, show_status: bool) -> bool:
         current_iwad = self.iwadInput.text().strip() if hasattr(self, "iwadInput") else self.config.iwad_path
@@ -748,10 +834,24 @@ class MainWindow(QMainWindow):
             self.rightLayout.setSpacing(12)
 
         if hasattr(self, 'lostSoulWidget'):
+            browser_expanded = (
+                hasattr(self, "wadFinder")
+                and self.wadFinder.expandBrowserButton.isChecked()
+            )
+            if browser_expanded:
+                self.lostSoulWidget.setPlaybackPaused(True)
+                self.lostSoulWidget.hide()
+                self.wadFinder.setCompactMode(False)
+                return
+            compact = height < 760
+            self.lostSoulWidget.setPlaybackPaused(compact)
+            self.lostSoulWidget.setVisible(not compact)
+            if hasattr(self, "wadFinder"):
+                self.wadFinder.setCompactMode(compact)
             if width < 700 or height < 500:
-                self.lostSoulWidget.setMinimumSize(150, 120)
+                self.lostSoulWidget.setMinimumSize(140, 60)
             else:
-                self.lostSoulWidget.setMinimumSize(180, 140)
+                self.lostSoulWidget.setMinimumSize(160, 72)
 
     def closeEvent(self, event):
         try:
