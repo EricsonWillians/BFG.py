@@ -86,9 +86,17 @@ class PerformanceSettings:
 
     def __init__(self):
         self._data = PerformanceSettingsData().__dict__.copy()
-        self._load_from_env()
+        # Keys explicitly set via BFG_* env vars; these win over profile
+        # presets and config-file values.
+        self._env_keys = set()
         self.animation_runtime = AnimationRuntime(self)
+        # Apply the profile preset FIRST so env overrides (loaded next) win.
         self.apply_profile(self._data.get("render_profile", "high"))
+        self._load_from_env()
+        env_profile = os.getenv("BFG_RENDER_PROFILE")
+        if env_profile:
+            # Selects the preset; individual env overrides still win.
+            self.apply_profile(env_profile)
 
     def _load_from_env(self):
         env_mappings = [
@@ -117,6 +125,7 @@ class PerformanceSettings:
                 continue
             try:
                 self._data[setting] = converter(raw)
+                self._env_keys.add(setting)
             except (TypeError, ValueError):
                 pass
 
@@ -130,9 +139,35 @@ class PerformanceSettings:
         if profile not in self.PROFILE_PRESETS:
             profile = "high"
         for key, value in self.PROFILE_PRESETS[profile].items():
+            if key in self._env_keys:
+                continue  # explicit env override wins over the preset
             self._data[key] = value
         self._data["render_profile"] = profile
         self.animation_runtime.set_profile(profile)
+
+    def apply_config(self, performance_config: Any) -> None:
+        """Apply the ``performance`` block of LauncherConfig.
+
+        Maps config keys to their runtime setting names. Explicit env
+        overrides (BFG_*) still win over config-file values.
+        """
+        if performance_config is None:
+            return
+        mapping = [
+            ("log_buffer_max_lines", "log_buffer_max_lines"),
+            ("background_animation_enabled", "background_animation_enabled"),
+            ("tile_cache_bytes", "tile_cache_max_bytes"),
+            ("tile_cache_ttl", "tile_cache_ttl_seconds"),
+            ("mod_cache_bytes", "mod_cache_max_bytes"),
+            ("mod_cache_ttl", "mod_cache_ttl_seconds"),
+            ("mod_cache_entries", "mod_cache_max_entries"),
+        ]
+        for config_key, setting in mapping:
+            if setting in self._env_keys:
+                continue
+            value = getattr(performance_config, config_key, None)
+            if value is not None:
+                self._data[setting] = value
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)

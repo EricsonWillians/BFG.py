@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import tempfile
 from html import escape, unescape
 import re
 import time
@@ -2021,11 +2022,31 @@ class WadFinder(QWidget):
         self.source_state_changed = source_state_changed
         self.library_dir_changed = library_dir_changed
 
+        # cache_root/library_dir come from user config and may point at a
+        # removed drive, a path occupied by a file, or an unwritable location.
+        # Never let mkdir failures kill the whole app at startup.
         cache_root = Path(os.getenv("BFG_CACHE_DIR", Path.home() / ".cache" / "bfg.py"))
+        try:
+            (cache_root / "source_index").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"WadFinder: cache dir {cache_root} unusable ({exc}); falling back to temp dir")
+            cache_root = Path(tempfile.gettempdir()) / "bfg.py"
+            try:
+                (cache_root / "source_index").mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
         self.cache_root = cache_root
+
         self.library_dir = Path(library_dir).expanduser() if library_dir else cache_root / "mods"
-        self.library_dir.mkdir(parents=True, exist_ok=True)
-        (self.cache_root / "source_index").mkdir(parents=True, exist_ok=True)
+        try:
+            self.library_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"WadFinder: library dir {self.library_dir} unusable ({exc}); falling back to {cache_root / 'mods'}")
+            self.library_dir = cache_root / "mods"
+            try:
+                self.library_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
         self._health_file = self.cache_root / "source_health.json"
 
         self._thread_pool = QThreadPool.globalInstance()

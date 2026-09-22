@@ -128,9 +128,10 @@ def resolve_source_port(
 def _split_options(raw: str) -> List[str]:
     if not raw:
         return []
-    if os.name == "nt":
-        return shlex.split(raw, posix=False)
-    return shlex.split(raw)
+    # QProcess takes an argv list, so no shell quoting is needed on any
+    # platform. posix=True strips quote characters; posix=False kept them in
+    # the tokens and corrupted quoted paths containing spaces on Windows.
+    return shlex.split(raw, posix=True)
 
 
 class LaunchOrchestrator(QObject):
@@ -256,15 +257,9 @@ class LaunchOrchestrator(QObject):
         self._process.start()
         self._startup_timeout.start()
 
-        if not self._process.waitForStarted(3000):
-            reason = f"Failed to start process: {resolved_source}"
-            if self._state != self.STATE_FAILED:
-                self._record_error(reason)
-                self._set_state(self.STATE_FAILED)
-            else:
-                reason = self._last_failure_reason or reason
-            return LaunchHandle(request_id=request_id, started=False, reason=reason)
-
+        # Do NOT waitForStarted() here: it blocks the GUI thread for up to 3s.
+        # Start failures are delivered asynchronously via errorOccurred and
+        # handled in _on_error, which records the failure and emits finished.
         return LaunchHandle(request_id=request_id, started=True)
 
     def request_stop(self) -> None:
@@ -281,11 +276,18 @@ class LaunchOrchestrator(QObject):
             # Non-blocking: terminate, then escalate to kill via timer if the
             # process is still alive. The async finished signal transitions state.
             self._process.terminate()
-            QTimer.singleShot(1200, self._kill_if_running)
+            request_id = self._active_request_id
+            QTimer.singleShot(1200, lambda rid=request_id: self._kill_if_running(rid))
         elif self._process.state() == QProcess.NotRunning:
             self._set_state(self.STATE_IDLE, reason="Stopped")
 
-    def _kill_if_running(self) -> None:
+    def _kill_if_running(self, request_id: int) -> None:
+        # Guard against stale timers: if a new launch started after this stop
+        # was requested, the request id changed and we must not kill it.
+        if request_id != self._active_request_id:
+            return
+        if self._state not in {self.STATE_CANCELING, self.STATE_FAILED}:
+            return
         if self._process.state() != QProcess.NotRunning:
             self._process.kill()
 
@@ -305,7 +307,14 @@ class LaunchOrchestrator(QObject):
         self._set_state(self.STATE_RUNNING)
 
     def _on_finished(self, exit_code: int, _exit_status) -> None:
-        if self._state not in {self.STATE_LAUNCHING, self.STATE_RUNNING, self.STATE_CANCELING}:
+        if self._state == self.STATE_FAILED:
+            # Startup-timeout path: the state was forced to FAILED before the
+            # terminated process reported its exit. The finished signal must
+            # still be emitted so listeners (status, logging, config save)
+            # behave like on every other exit path.
+            if self._last_failure_reason is None:
+                return
+        elif self._state not in {self.STATE_LAUNCHING, self.STATE_RUNNING, self.STATE_CANCELING}:
             return
         self._startup_timeout.stop()
         self._last_duration_ms = None
@@ -318,6 +327,11 @@ class LaunchOrchestrator(QObject):
         if self._state == self.STATE_CANCELING:
             reason = reason or "Stopped by user"
             self._set_state(self.STATE_FINISHED, reason=reason)
+            self.finished.emit(self._last_exit_code, reason)
+            return
+
+        if self._state == self.STATE_FAILED:
+            reason = reason or f"Process exited with code {exit_code}"
             self.finished.emit(self._last_exit_code, reason)
             return
 

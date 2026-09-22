@@ -278,6 +278,7 @@ class MainWindow(QMainWindow):
 
         self.installResponsiveLayout()
         self.set_render_profile(self.config.render_profile)
+        perf_settings.apply_config(self.config.performance)
         _ModInfoCache.configure(self.config)
         self.applyWarningsOrErrors()
         self._update_readiness()
@@ -866,6 +867,10 @@ class MainWindow(QMainWindow):
             self.saveConfig()
         except Exception as exc:
             self.errorDialog.showMessage(f"Failed to save config: {exc}")
+
+        # Persist any mod-metadata cache entries written since the last
+        # debounced flush.
+        _ModInfoCache.flush_now()
 
         if self.launchController.is_running():
             self.launchController.stop_launch()

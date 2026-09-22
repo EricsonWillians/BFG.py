@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -190,6 +191,11 @@ def _search_direct_root(root: Path, root_rank: int) -> List[Tuple[Tuple[int, int
     return out
 
 
+# Memoized per-process: this walks Steam library roots (top levels of every
+# installed game) and runs on the UI thread at startup and on every
+# source-port change. Direct-root scans stay uncached so IWADs appearing in
+# well-known dirs mid-session are still picked up.
+@lru_cache(maxsize=None)
 def _search_recursive_root(root: Path, root_rank: int, max_depth: int = 2) -> List[Tuple[Tuple[int, int, int], DetectedIWad]]:
     out: List[Tuple[Tuple[int, int, int], DetectedIWad]] = []
     if not root.is_dir():

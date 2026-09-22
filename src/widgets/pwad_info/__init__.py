@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import tempfile
+import time
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -206,8 +207,22 @@ class _ModInfoCache:
         except (OSError, json.JSONDecodeError):
             return
 
+    _last_flush: float = 0.0
+    _FLUSH_MIN_INTERVAL = 1.0  # seconds; batches rapid set() calls
+
     @classmethod
-    def _flush(cls):
+    def flush_now(cls) -> None:
+        """Persist the cache immediately (e.g. on application close)."""
+        cls._flush(force=True)
+
+    @classmethod
+    def _flush(cls, force: bool = False):
+        # Writing the whole (up to multi-MB) cache file on every set() stalls
+        # the GUI thread during batch scans; flush at most once per interval.
+        now = time.monotonic()
+        if not force and now - cls._last_flush < cls._FLUSH_MIN_INTERVAL:
+            return
+        cls._last_flush = now
         payload = {
             key: {
                 "text": value["text"],
@@ -348,6 +363,10 @@ class ModMetadataService(QObject):
 
     def cancel(self, token: int) -> None:
         self._cancelled.add(token)
+        # Tokens are monotonically increasing and cancelled tokens are often
+        # never re-requested; cap the set so it cannot grow unbounded.
+        if len(self._cancelled) > 64:
+            self._cancelled = set(sorted(self._cancelled)[-64:])
 
     def _is_canceled(self, token: int) -> bool:
         return token in self._cancelled
@@ -358,7 +377,9 @@ class ModMetadataService(QObject):
         self.progress.emit(token, done, total, path, text)
 
     def _on_finished(self, token: int, payload: dict):
-        if self._is_canceled(token):
+        was_cancelled = self._is_canceled(token)
+        self._cancelled.discard(token)
+        if was_cancelled:
             return
         for path, text in payload.items():
             if text:
@@ -366,7 +387,9 @@ class ModMetadataService(QObject):
         self.result_ready.emit(token, payload)
 
     def _on_failed(self, token: int, error: str):
-        if self._is_canceled(token):
+        was_cancelled = self._is_canceled(token)
+        self._cancelled.discard(token)
+        if was_cancelled:
             return
         self.failed.emit(token, error)
 
@@ -454,7 +477,8 @@ class PWadInfo(QGroupBox):
                 self._last_state[path] = "cached"
             else:
                 self._last_state[path] = "error"
-            _ModInfoCache.set(path, text)
+            # NOTE: no _ModInfoCache.set here — ModMetadataService._on_finished
+            # already cached every non-empty text for this payload.
         self._render(done=len(self._last_paths), total=len(self._last_paths))
 
     def _on_worker_failed(self, request_id: int, error_message: str):

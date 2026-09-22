@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -94,6 +95,10 @@ def _dedupe(values: List[str]) -> List[str]:
     return out
 
 
+# Memoized per-process: install roots do not change during a session, and
+# these scans (PATH, well-known dirs, AppImage globs) run on the UI thread
+# every time the configured port is edited.
+@lru_cache(maxsize=None)
 def discover_port_path_for_name(command: str, *, allow_appimages: bool = True) -> Optional[str]:
     candidates: List[str] = []
     command = (command or "").strip()
@@ -137,7 +142,17 @@ def discover_port_path_for_name(command: str, *, allow_appimages: bool = True) -
     return deduped[0] if deduped else None
 
 
+@lru_cache(maxsize=1)
+def _discover_source_ports_cached() -> Tuple[SourcePortCandidate, ...]:
+    return tuple(_discover_source_ports_uncached())
+
+
 def discover_source_ports() -> List[SourcePortCandidate]:
+    # Memoized per-process (see discover_port_path_for_name).
+    return list(_discover_source_ports_cached())
+
+
+def _discover_source_ports_uncached() -> List[SourcePortCandidate]:
     platform = _platform_key()
     preferred = KNOWN_SOURCE_PORTS.get(platform, KNOWN_SOURCE_PORTS["linux"])
     found: List[SourcePortCandidate] = []
@@ -188,11 +203,16 @@ def find_best_match(command: str) -> Optional[Tuple[str, str]]:
     if direct_path:
         return normalized, direct_path
 
-    ports = discover_source_ports()
-    if not ports:
-        return None
+    # Never substitute a different engine for a configured alias: silently
+    # launching e.g. GZDoom for a Zandronum netplay config breaks the session
+    # and must not overwrite the user's setting. Report "not found" instead.
+    return None
 
-    return normalized, ports[0].path
+
+def clear_discovery_caches() -> None:
+    """Drop memoized discovery results (e.g. after installing a new port)."""
+    discover_port_path_for_name.cache_clear()
+    _discover_source_ports_cached.cache_clear()
 
 
 def can_auto_detect(command: str) -> bool:

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 import time
@@ -78,7 +79,8 @@ def generate_hell_tile_array(width, height, seed=None):
 
 def save_hell_tile_png(arr, path):
     img = Image.fromarray(arr, "RGBA")
-    img.save(path)
+    # Explicit format: callers may use non-.png temp names (atomic .part writes).
+    img.save(path, format="PNG")
 
 
 def _make_tile_key(width: int, height: int, seed: Optional[int]) -> Tuple[int, int, int]:
@@ -104,6 +106,12 @@ def _cleanup_cache(force: bool = False):
             except OSError:
                 pass
 
+    # Recompute total AFTER expiry removal; using the stale pre-expiry total
+    # over-evicts LRU entries that are still within budget.
+    total = 0
+    for entry in _TILE_CACHE.values():
+        total += entry["size"]
+
     # Then trim LRU by bytes (evict oldest until under budget).
     while total > max_bytes and _TILE_CACHE:
         _, evict_entry = _TILE_CACHE.popitem(last=False)
@@ -113,6 +121,30 @@ def _cleanup_cache(force: bool = False):
                 os.remove(evict_entry["path"])
         except OSError:
             pass
+
+
+_ORPHANS_CLEANED = False
+# Legacy (per-process) tile names embedded the pid: bfg_tile_WxH_SEED_PID.png
+_LEGACY_TILE_RE = re.compile(r"^bfg_tile_\d+x\d+_\d+_\d+\.png$")
+_TILE_PART_RE = re.compile(r"^bfg_tile_.*\.part$")
+
+
+def _cleanup_orphan_tiles() -> None:
+    """Remove tile files leaked by previous processes (pid-named files could
+    never be reused or cleaned up across runs)."""
+    global _ORPHANS_CLEANED
+    if _ORPHANS_CLEANED:
+        return
+    _ORPHANS_CLEANED = True
+    try:
+        for name in os.listdir(tempfile.gettempdir()):
+            if _LEGACY_TILE_RE.match(name) or _TILE_PART_RE.match(name):
+                try:
+                    os.remove(os.path.join(tempfile.gettempdir(), name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def ensure_tile_file(tile_w: int, tile_h: int, seed=None, keep_existing: bool = False):
@@ -131,13 +163,28 @@ def ensure_tile_file(tile_w: int, tile_h: int, seed=None, keep_existing: bool = 
         _TILE_CACHE[key] = entry
         return entry["path"]
 
+    _cleanup_orphan_tiles()
     tempdir = tempfile.gettempdir()
-    path = os.path.join(tempdir, f"bfg_tile_{tile_w}x{tile_h}_{seed}_{os.getpid()}.png")
+    # No pid in the name: seeds are date-based, so the tile can be reused
+    # across processes (keep_existing) instead of leaking one file per run.
+    path = os.path.join(tempdir, f"bfg_tile_{tile_w}x{tile_h}_{seed}.png")
     if keep_existing and os.path.isfile(path):
         arr_path = path
     else:
         arr = generate_hell_tile_array(tile_w, tile_h, seed)
-        save_hell_tile_png(arr, path)
+        # Write via a temp file + rename so concurrent processes never read a
+        # partially written PNG.
+        part_path = f"{path}.{os.getpid()}.part"
+        try:
+            save_hell_tile_png(arr, part_path)
+            os.replace(part_path, path)
+        except OSError:
+            try:
+                if os.path.isfile(part_path):
+                    os.remove(part_path)
+            except OSError:
+                pass
+            save_hell_tile_png(arr, path)
         arr_path = path
 
     try:

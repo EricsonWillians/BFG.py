@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QAction, qApp
+from PyQt5.QtWidgets import QAction
 
 
 class ExitAction(QAction):
@@ -7,4 +7,7 @@ class ExitAction(QAction):
         super().__init__('&Exit', widget)
         self.setShortcut('Ctrl+Q')
         self.setStatusTip('Exit application')
-        self.triggered.connect(qApp.quit)
+        # Close the window instead of qApp.quit: quit() exits the event loop
+        # without delivering closeEvent, which would bypass saveConfig() and
+        # orphan a running game process.
+        self.triggered.connect(widget.close)

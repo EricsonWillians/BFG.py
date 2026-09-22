@@ -318,7 +318,7 @@ class LauncherConfig:
     extra_options: str = ""
     browser_sources: List[BrowserSourceConfig] = field(default_factory=_default_browser_sources)
 
-    # Legacy flat-key compatibility map.
+    # Legacy flat-key compatibility map (legacy name -> new name).
     _legacy_keys = {
         "lastSourcePort": "source_port_path",
         "lastIWad": "iwad_path",
@@ -331,6 +331,8 @@ class LauncherConfig:
         "performanceMode": "performance_mode",
         "browserSources": "browser_sources",
     }
+    # Reverse map (new name -> legacy name) for legacy lookups during load.
+    _new_to_legacy_keys = {new: legacy for legacy, new in _legacy_keys.items()}
 
     @property
     def source_port_path(self) -> str:
@@ -424,14 +426,14 @@ class LauncherConfig:
         def legacy_lookup(key: str, fallback: Any = None) -> Any:
             if key in data:
                 return data[key]
-            legacy = cls._legacy_keys.get(key)
+            legacy = cls._new_to_legacy_keys.get(key)
             if legacy and legacy in data:
                 return data[legacy]
             return fallback
 
         paths = PathsConfig(
             source_port_path=_coerce_str(
-                legacy_lookup("source_port_path", data.get("sourcePortPath"))
+                legacy_lookup("source_port_path", data.get("lastSourcePort"))
             ),
             iwad_path=_coerce_str(legacy_lookup("iwad_path", data.get("lastIWad"))),
             pwad_paths=_coerce_str_list(legacy_lookup("pwad_paths", data.get("lastPWads", []))),
@@ -452,7 +454,7 @@ class LauncherConfig:
         if not paths.source_port_path:
             paths.source_port_path = "gzdoom"
 
-        # Prefer top-level or legacy values over nested blocks for compatibility.
+        # Explicit v3 nested blocks take precedence over legacy/top-level keys.
         if "source_port_path" in raw_paths:
             paths.source_port_path = _coerce_str(raw_paths.get("source_port_path", "gzdoom"))
         if "iwad_path" in raw_paths:
@@ -550,6 +552,9 @@ class LauncherConfig:
             },
             "extra_options": self.extra_options,
             "lastOptions": self.extra_options,
+            "lastSourcePort": self.paths.source_port_path,
+            "lastIWad": self.paths.iwad_path,
+            "lastPWads": list(self.paths.pwad_paths),
             "browser_sources": _source_list_to_dict(self.browser_sources),
             "sourcePortDir": self.paths.source_port_dir,
             "iwadDir": self.paths.iwad_dir,
@@ -612,18 +617,24 @@ class LauncherConfig:
             return self.to_dict()[key]
         return default
 
+    _COERCED_PROPERTY_KEYS = frozenset({
+        "source_port_path", "iwad_path", "pwad_paths",
+        "source_port_dir", "iwad_dir", "pwad_dir",
+        "animated_background", "performance_mode", "render_profile",
+    })
+
     def set(self, key: str, value: Any):
-        if hasattr(self.paths, key):
-            setattr(self.paths, key, value)
-        elif hasattr(self.ui, key):
-            setattr(self.ui, key, value)
+        if key in self._legacy_keys:
+            self.set(self._legacy_keys[key], value)
+            return
+        if key in self._COERCED_PROPERTY_KEYS:
+            # Route through the LauncherConfig property setters so values are
+            # coerced (e.g. strings -> lists) instead of stored raw.
+            setattr(self, key, value)
         elif hasattr(self.performance, key):
             setattr(self.performance, key, value)
         elif key == "extra_options":
             self.extra_options = _coerce_str(value, default="")
-        elif key in self._legacy_keys:
-            mapped = self._legacy_keys[key]
-            self.set(mapped, value)
         elif key == "browser_sources" or key == "browserSources":
             self.browser_sources = _coerce_browser_sources(value)
 
@@ -676,8 +687,13 @@ def _make_backups(path: Path, keep: int) -> None:
     if keep <= 0:
         return
 
-    timestamp = int(time.time())
+    # Millisecond resolution plus a uniqueness bump avoids two rapid saves
+    # collapsing onto the same backup name and losing a generation.
+    timestamp = int(time.time() * 1000)
     backup = path.with_suffix(path.suffix + f".{timestamp}.bak")
+    while backup.exists():
+        timestamp += 1
+        backup = path.with_suffix(path.suffix + f".{timestamp}.bak")
     try:
         if path.exists():
             os.replace(path, backup)
@@ -795,7 +811,9 @@ def _normalize_wad_list(paths: List[str]) -> List[str]:
     seen = set()
     for entry in paths:
         normalized = str(_normalize_path(entry))
-        if not normalized or normalized in seen:
+        # _normalize_path("") yields Path() whose str() is "." — never treat
+        # the current working directory as a mod.
+        if not normalized or normalized == "." or normalized in seen:
             continue
         seen.add(normalized)
         # Keep paths even if the file is currently unavailable (e.g. unmounted
