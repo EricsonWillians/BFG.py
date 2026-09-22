@@ -104,20 +104,15 @@ def _cleanup_cache(force: bool = False):
             except OSError:
                 pass
 
-    # Then trim LRU by bytes.
-    for key in list(_TILE_CACHE.keys()):
-        if total <= max_bytes:
-            break
-        key_to_evict, evict_entry = _TILE_CACHE.popitem(last=False)
+    # Then trim LRU by bytes (evict oldest until under budget).
+    while total > max_bytes and _TILE_CACHE:
+        _, evict_entry = _TILE_CACHE.popitem(last=False)
         total -= evict_entry["size"]
         try:
             if os.path.isfile(evict_entry["path"]):
                 os.remove(evict_entry["path"])
         except OSError:
             pass
-
-        if key_to_evict == key and key not in _TILE_CACHE:
-            break
 
 
 def ensure_tile_file(tile_w: int, tile_h: int, seed=None, keep_existing: bool = False):

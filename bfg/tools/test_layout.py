@@ -5,7 +5,7 @@ import sys
 from PyQt5.QtWidgets import QApplication
 from src.widgets.main_window import MainWindow
 
-def test_layout():
+def run_layout_check():
     """Test the responsive layout at different window sizes."""
     app = QApplication(sys.argv)
     
@@ -27,4 +27,4 @@ def test_layout():
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
-    test_layout()
+    run_layout_check()

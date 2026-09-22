@@ -1,18 +1,9 @@
 # Legacy requirements mirror; prefer uv-based workflow with pyproject.toml
 # Install with: uv sync
 
-autopep8==1.5.5
-beautifulsoup4==4.9.3
-certifi==2020.12.5
-chardet==4.0.0
-idna==2.10
+defusedxml>=0.7.1
 numpy>=1.19.0
 Pillow>=8.0.0
 psutil>=5.8.0
-pycodestyle==2.6.0
-PyQt5==5.15.2
-PyQt5-sip==12.8.1
-requests==2.25.1
-soupsieve==2.2
-toml==0.10.2
-urllib3==1.26.3
+PyQt5>=5.15.2
+requests>=2.25.1

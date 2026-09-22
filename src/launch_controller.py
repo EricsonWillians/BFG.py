@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import shlex
 from pathlib import Path
@@ -214,8 +214,9 @@ class LaunchOrchestrator(QObject):
         if not validation.is_valid:
             for message in validation.errors:
                 self._record_error(message)
-            reason = validation.message or "Validation failed."
-            self._set_state(self.STATE_FAILED, reason=reason)
+            reason = validation.errors[0] if validation.errors else "Validation failed."
+            self._last_failure_reason = reason
+            self._set_state(self.STATE_FAILED)
             return LaunchHandle(request_id=request_id, started=False, reason=reason)
 
         if validation.warnings:
@@ -225,7 +226,7 @@ class LaunchOrchestrator(QObject):
         resolved_source, failure = resolve_source_port(normalized.source_port_path)
         if failure is not None:
             self._record_error(failure)
-            self._set_state(self.STATE_FAILED, reason=failure)
+            self._set_state(self.STATE_FAILED)
             return LaunchHandle(request_id=request_id, started=False, reason=failure)
 
         try:
@@ -233,7 +234,7 @@ class LaunchOrchestrator(QObject):
         except Exception as exc:  # pragma: no cover - defensive
             reason = f"Invalid extra options: {exc}"
             self._record_error(reason)
-            self._set_state(self.STATE_FAILED, reason=reason)
+            self._set_state(self.STATE_FAILED)
             return LaunchHandle(request_id=request_id, started=False, reason=reason)
 
         self._active_config = normalized
@@ -255,10 +256,13 @@ class LaunchOrchestrator(QObject):
         self._process.start()
         self._startup_timeout.start()
 
-        if self._process.state() == QProcess.NotRunning:
+        if not self._process.waitForStarted(3000):
             reason = f"Failed to start process: {resolved_source}"
-            self._record_error(reason)
-            self._set_state(self.STATE_FAILED, reason=reason)
+            if self._state != self.STATE_FAILED:
+                self._record_error(reason)
+                self._set_state(self.STATE_FAILED)
+            else:
+                reason = self._last_failure_reason or reason
             return LaunchHandle(request_id=request_id, started=False, reason=reason)
 
         return LaunchHandle(request_id=request_id, started=True)
@@ -274,13 +278,16 @@ class LaunchOrchestrator(QObject):
 
         self._startup_timeout.stop()
         if self._process.state() == QProcess.Running:
+            # Non-blocking: terminate, then escalate to kill via timer if the
+            # process is still alive. The async finished signal transitions state.
             self._process.terminate()
-            if not self._process.waitForFinished(1200):
-                self._process.kill()
-                self._process.waitForFinished(1200)
-        else:
-            self._process.kill()
+            QTimer.singleShot(1200, self._kill_if_running)
+        elif self._process.state() == QProcess.NotRunning:
             self._set_state(self.STATE_IDLE, reason="Stopped")
+
+    def _kill_if_running(self) -> None:
+        if self._process.state() != QProcess.NotRunning:
+            self._process.kill()
 
     def stop_launch(self) -> None:
         self.request_stop()
@@ -298,6 +305,8 @@ class LaunchOrchestrator(QObject):
         self._set_state(self.STATE_RUNNING)
 
     def _on_finished(self, exit_code: int, _exit_status) -> None:
+        if self._state not in {self.STATE_LAUNCHING, self.STATE_RUNNING, self.STATE_CANCELING}:
+            return
         self._startup_timeout.stop()
         self._last_duration_ms = None
         if self._last_start_time:
@@ -322,7 +331,15 @@ class LaunchOrchestrator(QObject):
         self.finished.emit(self._last_exit_code, reason)
 
     def _on_error(self, _error) -> None:
-        if self._state == self.STATE_IDLE:
+        if self._state not in {self.STATE_LAUNCHING, self.STATE_RUNNING, self.STATE_CANCELING}:
+            return
+        if self._state == self.STATE_CANCELING:
+            # terminate()/kill() during a user-requested stop reports as a
+            # crash; surface it as a normal stop instead.
+            reason = self._last_failure_reason or "Stopped by user"
+            self._set_state(self.STATE_FINISHED)
+            self.finished.emit(self._last_exit_code, reason)
+            self._startup_timeout.stop()
             return
         reason = self._process.errorString() or "Unknown launch failure."
         self._last_failure_reason = reason
@@ -353,7 +370,7 @@ class LaunchOrchestrator(QObject):
         line = line.rstrip("\n")
         if not line:
             return
-        self._buffer.append(f"[{datetime.utcnow().isoformat()}Z] {line}")
+        self._buffer.append(f"[{datetime.now(timezone.utc).isoformat()}] {line}")
         self.output_line.emit(line)
         self.output.emit(line)
 

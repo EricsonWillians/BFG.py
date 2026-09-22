@@ -8,9 +8,10 @@ from pathlib import Path
 import platform
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
-from PyQt5.QtCore import QObject, QCoreApplication, QEventLoop, pyqtSignal
+from PyQt5.QtCore import QObject, QCoreApplication, QEventLoop, QTimer, pyqtSignal
 
 from src.config import LauncherConfig
+from src.const import DEFAULT_CONFIG_PATH
 from src.iwad_detection import detect_iwad
 from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.performance import perf_settings
@@ -36,7 +37,10 @@ def _cache_dir() -> Path:
             except OSError:
                 continue
     fallback = Path.home() / ".cache" / "bfg.py"
-    fallback.mkdir(parents=True, exist_ok=True)
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return fallback
 
 
@@ -50,11 +54,14 @@ def _configure_runtime_logger() -> logging.Logger:
         return logger
 
     logger.setLevel(logging.INFO)
-    handler = RotatingFileHandler(
-        filename=str(_runtime_log_path()),
-        maxBytes=DEFAULT_LOG_BYTES,
-        backupCount=3,
-    )
+    try:
+        handler: logging.Handler = RotatingFileHandler(
+            filename=str(_runtime_log_path()),
+            maxBytes=DEFAULT_LOG_BYTES,
+            backupCount=3,
+        )
+    except OSError:
+        handler = logging.StreamHandler()
     handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
@@ -64,7 +71,7 @@ def _configure_runtime_logger() -> logging.Logger:
 
 @dataclass
 class RuntimeOptions:
-    config_path: str = "config.json"
+    config_path: str = DEFAULT_CONFIG_PATH
     performance_test: bool = False
     no_animations: bool = False
     source_port: Optional[str] = None
@@ -81,7 +88,7 @@ class RuntimeOptions:
 
 def parse_runtime_options(argv: Optional[List[str]] = None) -> RuntimeOptions:
     parser = argparse.ArgumentParser(prog="BFG.py", add_help=True)
-    parser.add_argument("--config", default="config.json", dest="config_path")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, dest="config_path")
     parser.add_argument("--performance-test", action="store_true")
     parser.add_argument("--no-animations", action="store_true")
     parser.add_argument("--source-port")
@@ -246,18 +253,30 @@ class ApplicationRuntime(QObject):
             if reason:
                 self.logger.info("Headless launch finished: %s", reason)
 
+        loop = QEventLoop()
         self.launch_orchestrator.finished.connect(_on_finished)
+        self.launch_orchestrator.finished.connect(lambda *args: loop.quit())
+
+        # Watchdog: quit if the process disappears without a finished signal.
+        watchdog = QTimer()
+        watchdog.setInterval(2000)
+        watchdog.timeout.connect(
+            lambda: loop.quit() if not self.launch_orchestrator.is_running() else None
+        )
 
         handle = self.launch_orchestrator.start_launch(self.config)
         if not handle.started:
             self.launch_orchestrator.stop_launch()
             return 1
 
-        while not done["finished"]:
-            app.processEvents()
-            if self.launch_orchestrator.is_running():
-                continue
-            break
+        watchdog.start()
+        if not done["finished"]:
+            # The process may have finished before the loop starts.
+            loop.exec_()
+        watchdog.stop()
+
+        if not done["finished"]:
+            result["code"] = 1
 
         return int(result.get("code", 0) or 0)
 

@@ -15,7 +15,6 @@ from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal, pyqtSl
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import QGroupBox, QPlainTextEdit, QVBoxLayout
 
-from src.config import LauncherConfig
 
 
 def _asset_cache_path() -> Path:
@@ -165,6 +164,8 @@ class _ModInfoCache:
     _MAX_ENTRIES = 500
     _MAX_BYTES = 4_000_000
     _TTL_SECONDS = 24 * 60 * 60
+    _max_entries = _MAX_ENTRIES
+    _max_bytes = _MAX_BYTES
     _cache_file = _asset_cache_path()
     _cache: OrderedDict[str, Dict] = OrderedDict()
 
@@ -234,8 +235,8 @@ class _ModInfoCache:
 
     @classmethod
     def _enforce_limits(cls):
-        max_bytes = max(256_000, int(LauncherConfig().performance.mod_cache_bytes))
-        max_entries = max(1, int(LauncherConfig().performance.mod_cache_entries))
+        max_bytes = cls._max_bytes
+        max_entries = cls._max_entries
         total_bytes = 0
         for value in cls._cache.values():
             total_bytes += int(value.get("size", 0))
@@ -251,6 +252,15 @@ class _ModInfoCache:
                 break
             _, entry = cls._cache.popitem(last=False)
             total_bytes -= int(entry.get("size", 0))
+
+    @classmethod
+    def configure(cls, config) -> None:
+        """Apply user-configured cache limits (mod_cache_bytes/entries)."""
+        try:
+            cls._max_bytes = max(256_000, int(config.performance.mod_cache_bytes))
+            cls._max_entries = max(1, int(config.performance.mod_cache_entries))
+        except (AttributeError, TypeError, ValueError):
+            pass
 
     @classmethod
     def get(cls, path: str) -> Optional[str]:

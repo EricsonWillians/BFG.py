@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QMovie, QPixmap, QColor, QImage, QPainter, QPainterPath
 from PyQt5.QtCore import Qt, QSize, QTimer, QRectF
 
+from src.const import asset_path
 from src.performance import perf_settings, animation_runtime
 
 
@@ -183,7 +184,7 @@ class LostSoulWindow(QDialog):
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setFixedSize(self.GIF_SIZE, self.GIF_SIZE)
         self.label.setStyleSheet("background: transparent;")
-        movie = QMovie("assets/lost_soul.gif")
+        movie = QMovie(asset_path("assets/lost_soul.gif"))
         movie.setScaledSize(QSize(self.GIF_SIZE, self.GIF_SIZE))
         self.label.setMovie(movie)
         movie.start()

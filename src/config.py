@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import time
@@ -11,6 +12,8 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.source_port_discovery import can_auto_detect, find_best_match
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_ENTRIES = 300
 SCHEMA_VERSION = 3
@@ -413,7 +416,7 @@ class LauncherConfig:
         if not isinstance(data, dict):
             return cls()
 
-        schema_version = int(data.get("schema_version", 1) or 1)
+        schema_version = _coerce_int(data.get("schema_version", 1) or 1, default=1)
         raw_paths = _coerce_dict(data.get("paths"))
         raw_ui = _coerce_dict(data.get("ui"))
         raw_perf = _coerce_dict(data.get("performance"))
@@ -505,9 +508,9 @@ class LauncherConfig:
         cfg = LauncherConfig.from_raw(self.to_dict())
         cfg.paths.source_port_path = _normalize_command_path(cfg.paths.source_port_path)
         cfg.paths.iwad_path = str(_normalize_path(cfg.paths.iwad_path)) if cfg.paths.iwad_path else ""
-        cfg.paths.source_port_dir = str(_normalize_path(cfg.paths.source_port_dir, must_exist=False))
-        cfg.paths.iwad_dir = str(_normalize_path(cfg.paths.iwad_dir, must_exist=False))
-        cfg.paths.pwad_dir = str(_normalize_path(cfg.paths.pwad_dir, must_exist=False))
+        cfg.paths.source_port_dir = str(_normalize_path(cfg.paths.source_port_dir))
+        cfg.paths.iwad_dir = str(_normalize_path(cfg.paths.iwad_dir))
+        cfg.paths.pwad_dir = str(_normalize_path(cfg.paths.pwad_dir))
         cfg.paths.pwad_paths = _normalize_wad_list(cfg.paths.pwad_paths)
         cfg.browser_sources = _coerce_browser_sources([entry.to_dict() for entry in cfg.browser_sources])
 
@@ -574,7 +577,7 @@ class LauncherConfig:
                 result.errors.append(f"Source port not found or not executable: {source_port}")
 
         if self.paths.iwad_path:
-            iwad = _normalize_path(self.paths.iwad_path, must_exist=False)
+            iwad = _normalize_path(self.paths.iwad_path)
             if not iwad.exists():
                 result.is_valid = False
                 result.errors.append(f"IWAD does not exist: {self.paths.iwad_path}")
@@ -585,7 +588,7 @@ class LauncherConfig:
             result.warnings.append("No IWAD selected; relying on source-port default resolution.")
 
         for path in self.paths.pwad_paths:
-            wad = _normalize_path(path, must_exist=False)
+            wad = _normalize_path(path)
             if not wad.exists():
                 result.is_valid = False
                 result.errors.append(f"Mod does not exist: {path}")
@@ -639,7 +642,11 @@ class ConfigStore:
         except (OSError, json.JSONDecodeError, ValueError):
             return LauncherConfig().normalized()
 
-        return LauncherConfig.from_raw(raw).normalized()
+        try:
+            return LauncherConfig.from_raw(raw).normalized()
+        except Exception as exc:  # defensive: never crash on a malformed config
+            logger.warning("Ignoring malformed config %s: %s", self.path, exc)
+            return LauncherConfig().normalized()
 
     def save(
         self,
@@ -735,7 +742,7 @@ def _coerce_str_list(value: Any) -> List[str]:
     return out
 
 
-def _normalize_path(path: str, *, must_exist: bool = True) -> Path:
+def _normalize_path(path: str) -> Path:
     text = _coerce_str(path, default="")
     if not text:
         return Path()
@@ -746,8 +753,6 @@ def _normalize_path(path: str, *, must_exist: bool = True) -> Path:
     except (OSError, RuntimeError):
         candidate = candidate.expanduser().absolute()
 
-    if must_exist and not candidate.exists():
-        return candidate
     return candidate
 
 
@@ -789,12 +794,13 @@ def _normalize_wad_list(paths: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for entry in paths:
-        normalized = str(_normalize_path(entry, must_exist=False))
+        normalized = str(_normalize_path(entry))
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        if Path(normalized).is_file():
-            out.append(str(Path(normalized)))
+        # Keep paths even if the file is currently unavailable (e.g. unmounted
+        # drive); existence is enforced at launch time by validate_launch_target.
+        out.append(str(Path(normalized)))
     return out
 
 

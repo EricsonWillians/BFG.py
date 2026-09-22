@@ -9,6 +9,9 @@ import time
 import webbrowser
 import xml.etree.ElementTree as ET
 import zipfile
+
+import defusedxml.ElementTree as DET
+from defusedxml.common import DefusedXmlException
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
-from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -1006,8 +1009,8 @@ class _SearchWorker(QRunnable):
             return []
 
         try:
-            root = ET.fromstring(text)
-        except ET.ParseError:
+            root = DET.fromstring(text)
+        except (ET.ParseError, DefusedXmlException):
             return []
 
         namespace = "{http://www.w3.org/2005/Atom}"
@@ -1931,12 +1934,12 @@ def _result_search_blob(result: WadBrowserResult) -> str:
     ).lower()
 
 
-def _safe_library_name(path: str, source_id: str, target_dir: Path) -> Path:
+def _safe_library_name(path: str, source_id: str, target_dir: Path, reserved: Optional[set] = None) -> Path:
     file_name = os.path.basename(path)
     if not file_name:
         file_name = f"mod_{source_id}.pkg"
     candidate = target_dir / file_name
-    if not candidate.exists():
+    if not candidate.exists() and (reserved is None or str(candidate).lower() not in reserved):
         return candidate
 
     stem = candidate.stem
@@ -1944,7 +1947,7 @@ def _safe_library_name(path: str, source_id: str, target_dir: Path) -> Path:
     idx = 1
     while True:
         alt = target_dir / f"{stem}_{idx}__{source_id}{suffix}"
-        if not alt.exists():
+        if not alt.exists() and (reserved is None or str(alt).lower() not in reserved):
             return alt
         idx += 1
 
@@ -2039,6 +2042,11 @@ class WadFinder(QWidget):
         self._failed_downloads: List[WadBrowserResult] = []
         self._failed_download_auto_add: bool = False
         self._library_rows: List[Dict[str, Any]] = []
+
+        self._local_filter_timer = QTimer(self)
+        self._local_filter_timer.setSingleShot(True)
+        self._local_filter_timer.setInterval(250)
+        self._local_filter_timer.timeout.connect(self._refresh_local_library)
 
         self._load_index_cache()
         self._load_source_health_cache()
@@ -2249,7 +2257,7 @@ class WadFinder(QWidget):
         localFilterLabel = QLabel("Library filter:")
         self.localFilterInput = QLineEdit()
         self.localFilterInput.setPlaceholderText("Filter library by name, source, or remote path")
-        self.localFilterInput.textChanged.connect(self._refresh_local_library)
+        self.localFilterInput.textChanged.connect(self._local_filter_timer.start)
         localFilterRow.addWidget(localFilterLabel)
         localFilterRow.addWidget(self.localFilterInput, 1)
 
@@ -4681,18 +4689,32 @@ class WadFinder(QWidget):
             return
         self._start_download_session(selected_results, auto_add=False)
 
-    def _safe_library_path(self, result: WadBrowserResult) -> Path:
+    def _build_library_identity_map(self) -> Dict[tuple, Path]:
+        identity_map: Dict[tuple, Path] = {}
+        for candidate in self.library_dir.glob("*"):
+            if not candidate.is_file() or candidate.suffix.lower() not in DEFAULT_EXTENSIONS:
+                continue
+            metadata = self._read_metadata(str(candidate))
+            metadata_remote = _normalize_remote_path(str(metadata.get("remote_path", ""))).lower()
+            metadata_source = str(metadata.get("source_id", "")).lower()
+            if metadata_remote:
+                identity_map.setdefault((metadata_remote, metadata_source), candidate)
+        return identity_map
+
+    def _safe_library_path(
+        self,
+        result: WadBrowserResult,
+        reserved: Optional[set] = None,
+        identity_map: Optional[Dict[tuple, Path]] = None,
+    ) -> Path:
         remote_identity = _normalize_remote_path(result.remote_path).lower()
         if remote_identity:
-            for candidate in self.library_dir.glob("*"):
-                if not candidate.is_file() or candidate.suffix.lower() not in DEFAULT_EXTENSIONS:
-                    continue
-                metadata = self._read_metadata(str(candidate))
-                metadata_remote = _normalize_remote_path(str(metadata.get("remote_path", ""))).lower()
-                metadata_source = str(metadata.get("source_id", "")).lower()
-                if metadata_remote == remote_identity and metadata_source == result.source_id.lower():
-                    return candidate
-        return _safe_library_name(result.remote_path, result.source_id, self.library_dir)
+            if identity_map is None:
+                identity_map = self._build_library_identity_map()
+            candidate = identity_map.get((remote_identity, result.source_id.lower()))
+            if candidate is not None and (reserved is None or str(candidate).lower() not in reserved):
+                return candidate
+        return _safe_library_name(result.remote_path, result.source_id, self.library_dir, reserved)
 
     def _metadata_path(self, destination: str) -> Path:
         destination_path = Path(destination)
@@ -4846,8 +4868,11 @@ class WadFinder(QWidget):
         self.searchProgressBar.show()
         self._set_status(f"Preparing {len(deduped)} download(s)...")
 
+        reserved: set = set()
+        identity_map = self._build_library_identity_map()
         for result in deduped:
-            target = self._safe_library_path(result)
+            target = self._safe_library_path(result, reserved, identity_map)
+            reserved.add(str(target).lower())
             if target.exists():
                 # Avoid duplicate downloads.
                 existing = self._download_sessions[token]

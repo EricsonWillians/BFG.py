@@ -10,6 +10,7 @@ from src.widgets.iwad_input import IWadInput
 from src.widgets.pwad_list import PWadList
 from PyQt5.QtWidgets import QLineEdit
 from pathlib import Path
+from src.const import asset_path
 
 class ContrastTestWindow(QWidget):
     def __init__(self):
@@ -18,7 +19,7 @@ class ContrastTestWindow(QWidget):
         self.setGeometry(100, 100, 800, 600)
         
         # Load theme
-        theme_file = Path('assets/nc_theme.qss')
+        theme_file = Path(asset_path('assets/nc_theme.qss'))
         if theme_file.exists():
             with open(theme_file, 'r') as fh:
                 self.setStyleSheet(fh.read())
@@ -82,7 +83,7 @@ Lumps: 2,847
         
         self.setLayout(layout)
 
-def test_contrast():
+def run_contrast_check():
     """Test the improved contrast and styling."""
     app = QApplication(sys.argv)
     
@@ -111,4 +112,4 @@ def test_contrast():
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
-    test_contrast()
+    run_contrast_check()

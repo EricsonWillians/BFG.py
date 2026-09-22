@@ -7,7 +7,7 @@ from pathlib import Path, PurePath
 from typing import Optional
 
 from PyQt5.Qt import Qt
-from PyQt5.QtCore import QEvent, QUrl
+from PyQt5.QtCore import QEvent, QTimer, QUrl
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QAction,
@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src import const
+from src.const import asset_path
 from src.iwad_detection import detect_iwad
 from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.runtime import ApplicationRuntime
@@ -51,6 +52,7 @@ from src.widgets.log_window import LogWindow
 from src.widgets.lost_soul_window import LostSoulWindow
 from src.widgets.doom_soul_widget import DoomSoulWidget
 from src.widgets.mod_panel import ModPanel
+from src.widgets.pwad_info import _ModInfoCache
 from src.widgets.wad_finder import WadFinder
 
 
@@ -94,7 +96,7 @@ class MainWindow(QMainWindow):
         self.createMenu()
         self.addWidgets()
 
-        theme_file = Path('assets/nc_theme.qss')
+        theme_file = Path(asset_path('assets/nc_theme.qss'))
         if theme_file.exists():
             with open(theme_file, 'r') as fh:
                 self.setStyleSheet(fh.read())
@@ -239,7 +241,12 @@ class MainWindow(QMainWindow):
         self.modPanel.setMods(self.config.pwad_paths)
         self.modPanel.addRequested.connect(self.openPWadAction._open)
         self.modPanel.browseRequested.connect(self._focus_mod_browser)
-        self.modPanel.modsChanged.connect(self.saveConfig)
+        # Debounce config saves: drag-reorders/deletes emit modsChanged rapidly.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)
+        self._save_timer.timeout.connect(self.saveConfig)
+        self.modPanel.modsChanged.connect(self._save_timer.start)
 
         self.optionsGroup = QGroupBox("4. LAUNCH OPTIONS")
         optionsLayout = QVBoxLayout(self.optionsGroup)
@@ -256,7 +263,7 @@ class MainWindow(QMainWindow):
         self.launchButton.clicked.connect(self._onLaunchRequested)
 
         self.lostSoulWidget = DoomSoulWidget(
-            skull_gif_path="assets/lost_soul.gif",
+            skull_gif_path=asset_path("assets/lost_soul.gif"),
             animated_background=self.config.animated_background,
         )
         self.lostSoulWidget.setMinimumSize(160, 72)
@@ -271,6 +278,7 @@ class MainWindow(QMainWindow):
 
         self.installResponsiveLayout()
         self.set_render_profile(self.config.render_profile)
+        _ModInfoCache.configure(self.config)
         self.applyWarningsOrErrors()
         self._update_readiness()
 

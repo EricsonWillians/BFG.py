@@ -1,40 +1,33 @@
 #!/usr/bin/env python3
 """Optimization utility for BFG.py."""
 
-import json
-import os
 import sys
-from pathlib import Path
+
+from src.config import LauncherConfig
+from src.const import DEFAULT_CONFIG_PATH
+
 
 def optimize_config():
-    """Apply performance optimizations to config.json."""
-    config_path = Path("config.json")
-    
-    # Load existing config or create new one
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        print("✓ Loaded existing config.json")
-    else:
-        config = {}
-        print("✓ Creating new config.json")
-    
-    # Apply performance optimizations
+    """Apply performance optimizations to config.json (via LauncherConfig)."""
+    config_path = DEFAULT_CONFIG_PATH
+
+    config = LauncherConfig.load(config_path)
+    print(f"✓ Loaded config from {config_path}")
+
+    # Apply performance optimizations through the schema-aware config object
+    # so they land in the nested `ui` block and survive the next load.
     optimizations = {
         'animated_background': False,  # Disable for maximum performance
         'performance_mode': True,      # Enable performance mode
     }
-    
+
     print("\n🔧 Applying performance optimizations:")
     for key, value in optimizations.items():
-        old_value = config.get(key, "not set")
-        config[key] = value
+        old_value = getattr(config, key, "not set")
+        setattr(config, key, value)
         print(f"  {key}: {old_value} → {value}")
-    
-    # Save optimized config
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    
+
+    config.save(config_path)  # atomic write + timestamped backups
     print(f"\n✓ Optimized config saved to {config_path}")
 
 def set_env_vars():
@@ -83,8 +76,8 @@ def check_system():
     python_version = sys.version_info
     print(f"  Python: {python_version.major}.{python_version.minor}.{python_version.micro}")
     
-    if python_version < (3, 7):
-        print("  ⚠️  Python 3.7+ recommended for better performance")
+    if python_version < (3, 9):
+        print("  ⚠️  Python 3.9+ required")
 
 def main():
     print("💀 BFG.py - Performance Optimizer 💀")

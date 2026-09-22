@@ -7,8 +7,8 @@ import psutil
 import os
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel
 from PyQt5.QtCore import QTimer
+from src.const import asset_path
 from src.widgets.doom_soul_widget import DoomSoulWidget
-from src.widgets.lost_soul_window import LostSoulWindow
 from src.performance import perf_settings
 
 class PerformanceTestWindow(QWidget):
@@ -25,7 +25,7 @@ class PerformanceTestWindow(QWidget):
         
         # Add skull widget for testing
         self.skull_widget = DoomSoulWidget(
-            skull_gif_path="assets/lost_soul.gif",
+            skull_gif_path=asset_path("assets/lost_soul.gif"),
             animated_background=True
         )
         layout.addWidget(self.skull_widget)

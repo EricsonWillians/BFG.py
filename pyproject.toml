@@ -10,21 +10,19 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
-  "beautifulsoup4>=4.9.3",
+  "defusedxml>=0.7.1",
   "numpy>=1.19.0",
   "Pillow>=8.0.0",
   "psutil>=5.8.0",
   "PyQt5>=5.15.2",
-  "PyQt5-sip>=12.8.0",
   "requests>=2.25.1",
-  "toml>=0.10.2",
 ]
 
 [project.scripts]
 bfg = "bfg.cli:main"
 bfg-perf = "bfg.tools.performance_test:run_performance_test"
-bfg-contrast-check = "bfg.tools.test_contrast:test_contrast"
-bfg-layout-check = "bfg.tools.test_layout:test_layout"
+bfg-contrast-check = "bfg.tools.test_contrast:run_contrast_check"
+bfg-layout-check = "bfg.tools.test_layout:run_layout_check"
 bfg-optimize = "bfg.tools.optimize:main"
 
 [project.optional-dependencies]
@@ -37,6 +35,12 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src", "bfg"]
+
+[tool.pytest.ini_options]
+# The repo has no automated test suite yet; the *test_*.py files under
+# bfg/tools/ are interactive GUI smoke scripts that must never be collected
+# (they would hang on a modal Qt event loop).
+norecursedirs = ["bfg/tools", "src", ".venv", "assets"]
 
 [tool.uv]
 managed = true
