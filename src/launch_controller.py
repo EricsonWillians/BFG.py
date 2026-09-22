@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
+import re
 import shlex
 from pathlib import Path
 import shutil
@@ -15,6 +16,14 @@ from PyQt5.QtCore import QObject, QProcess, QTimer, QElapsedTimer, pyqtSignal
 from src.config import LauncherConfig
 from src.performance import perf_settings
 from src.source_port_discovery import can_auto_detect, discover_source_ports, find_best_match
+
+# ANSI escape sequences: CSI (\x1b[...), OSC (\x1b]...\x07/\x1b\\), and
+# remaining two-character escapes.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
 
 
 @dataclass
@@ -305,6 +314,29 @@ class LaunchOrchestrator(QObject):
             return
         self._startup_timeout.stop()
         self._set_state(self.STATE_RUNNING)
+        self._raise_attempts = 0
+        self._raise_game_window_when_mapped()
+
+    def _raise_game_window_when_mapped(self) -> None:
+        """Best-effort: bring the game window to the front once it maps.
+
+        When the user is focused on another (e.g. fullscreen) app, the window
+        manager's focus-stealing prevention maps the game window buried
+        underneath it — the game runs (menu music plays) but stays invisible.
+        A launcher requesting activation right after launch is a legitimate
+        user action, so WMs honor _NET_ACTIVE_WINDOW here.
+        """
+        if self._state != self.STATE_RUNNING:
+            return
+        pid = int(self._process.processId())
+        if pid <= 0:
+            return
+        if _x11_activate_window_for_pid(pid):
+            return
+        self._raise_attempts += 1
+        # The SDL window can take several seconds to map; keep polling.
+        if self._raise_attempts <= 40:
+            QTimer.singleShot(500, self._raise_game_window_when_mapped)
 
     def _on_finished(self, exit_code: int, _exit_status) -> None:
         if self._state == self.STATE_FAILED:
@@ -381,7 +413,9 @@ class LaunchOrchestrator(QObject):
                 self._append_output(line)
 
     def _append_output(self, line: str) -> None:
-        line = line.rstrip("\n")
+        # Strip ANSI escape sequences (source ports print truecolor terminal
+        # art on shutdown); they render as garbage and bloat layout cost.
+        line = _ANSI_ESCAPE_RE.sub("", line).rstrip()
         if not line:
             return
         self._buffer.append(f"[{datetime.now(timezone.utc).isoformat()}] {line}")
@@ -395,3 +429,114 @@ class LaunchOrchestrator(QObject):
 
 # Compatibility alias expected by legacy call sites.
 LaunchController = LaunchOrchestrator
+
+
+def _x11_activate_window_for_pid(pid: int) -> bool:
+    """Raise + focus the top-level X11 window owned by ``pid``.
+
+    Returns True when the window was found and the activation request was
+    sent. No-op (False) off X11 or when the window has not mapped yet.
+    Uses ctypes/libX11 directly to avoid new dependencies.
+    """
+    if os.name == "nt" or not os.environ.get("DISPLAY"):
+        return False
+    import ctypes
+    from ctypes import (
+        POINTER, byref, c_char_p, c_int, c_long, c_ulong, c_void_p,
+    )
+
+    try:
+        x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+    except OSError:
+        return False
+
+    dpy = x11.XOpenDisplay(None)
+    if not dpy:
+        return False
+    try:
+        # Declare full prototypes: without them ctypes assumes 32-bit ints and
+        # corrupts the 64-bit long arguments of XGetWindowProperty.
+        x11.XDefaultRootWindow.restype = c_ulong
+        x11.XDefaultRootWindow.argtypes = [c_void_p]
+        x11.XInternAtom.restype = c_ulong
+        x11.XInternAtom.argtypes = [c_void_p, c_char_p, c_int]
+        x11.XGetWindowProperty.restype = c_int
+        x11.XGetWindowProperty.argtypes = [
+            c_void_p, c_ulong, c_ulong, c_long, c_long, c_int, c_ulong,
+            POINTER(c_ulong), POINTER(c_int), POINTER(c_ulong),
+            POINTER(c_ulong), POINTER(POINTER(c_ulong)),
+        ]
+        x11.XFree.argtypes = [c_void_p]
+        x11.XFlush.argtypes = [c_void_p]
+        x11.XCloseDisplay.argtypes = [c_void_p]
+        root = x11.XDefaultRootWindow(dpy)
+
+        net_client_list = x11.XInternAtom(dpy, b"_NET_CLIENT_LIST", 0)
+        net_wm_pid = x11.XInternAtom(dpy, b"_NET_WM_PID", 0)
+        net_active_window = x11.XInternAtom(dpy, b"_NET_ACTIVE_WINDOW", 0)
+        XA_WINDOW, XA_CARDINAL = 33, 6
+
+        actual_type = c_ulong()
+        actual_format = c_int()
+        nitems = c_ulong()
+        bytes_after = c_ulong()
+
+        prop = POINTER(c_ulong)()
+        status = x11.XGetWindowProperty(
+            dpy, root, net_client_list, 0, 1024, 0, XA_WINDOW,
+            byref(actual_type), byref(actual_format), byref(nitems),
+            byref(bytes_after), byref(prop),
+        )
+        if status != 0 or not prop:
+            return False
+        try:
+            windows = [int(prop[i]) for i in range(nitems.value)]
+        finally:
+            x11.XFree(prop)
+
+        target = None
+        for wid in windows:
+            wprop = POINTER(c_ulong)()
+            status = x11.XGetWindowProperty(
+                dpy, c_ulong(wid), net_wm_pid, 0, 1, 0, XA_CARDINAL,
+                byref(actual_type), byref(actual_format), byref(nitems),
+                byref(bytes_after), byref(wprop),
+            )
+            if status == 0 and wprop and nitems.value == 1 and int(wprop[0]) == pid:
+                target = wid
+            if wprop:
+                x11.XFree(wprop)
+            if target is not None:
+                break
+        if target is None:
+            return False
+
+        class _ClientData(ctypes.Union):
+            _fields_ = [("b", ctypes.c_char * 20), ("s", ctypes.c_short * 10), ("l", c_long * 5)]
+
+        class _ClientMessage(ctypes.Structure):
+            _fields_ = [
+                ("type", c_int), ("serial", c_ulong), ("send_event", c_int),
+                ("display", c_void_p), ("window", c_ulong),
+                ("message_type", c_ulong), ("format", c_int), ("data", _ClientData),
+            ]
+
+        class _XEvent(ctypes.Union):
+            _fields_ = [("type", c_int), ("xclient", _ClientMessage), ("pad", c_long * 24)]
+
+        event = _XEvent()
+        event.xclient.type = 33  # ClientMessage
+        event.xclient.window = target
+        event.xclient.message_type = net_active_window
+        event.xclient.format = 32
+        event.xclient.data.l[0] = 2  # source: direct user action (launcher)
+        event.xclient.data.l[1] = 0  # timestamp: CurrentTime
+        event.xclient.data.l[2] = 0  # no requestor window
+        mask = (1 << 20) | (1 << 21)  # SubstructureRedirect | SubstructureNotify
+        x11.XSendEvent(dpy, root, 0, mask, byref(event))
+        x11.XFlush(dpy)
+        return True
+    except Exception:  # pragma: no cover - X11 interop is best-effort
+        return False
+    finally:
+        x11.XCloseDisplay(dpy)
