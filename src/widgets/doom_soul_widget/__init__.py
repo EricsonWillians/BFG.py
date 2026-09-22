@@ -28,8 +28,9 @@ def _cache_ttl_seconds() -> int:
 
 
 def generate_hell_tile_array(width, height, seed=None):
-    if seed is not None:
-        np.random.seed(seed)
+    # Use a local generator: np.random.seed() would deterministically reset
+    # process-wide RNG state on every tile (re)generation.
+    rng = np.random.default_rng(seed)
 
     y_coords, x_coords = np.mgrid[0:height, 0:width]
     r = np.clip(26 + 32 * np.sin(0.11 * y_coords + 0.19 * x_coords) + 38, 0, 255)
@@ -42,7 +43,7 @@ def generate_hell_tile_array(width, height, seed=None):
     arr[:, :, 2] = b
     arr[:, :, 3] = 255
 
-    cracks = np.random.rand(3, 4) * np.array([[width, height, 2 * np.pi, width / 3]])
+    cracks = rng.random((3, 4)) * np.array([[width, height, 2 * np.pi, width / 3]])
     for cx, cy, a, l in cracks:
         t_vals = np.arange(0, int(l), 2)
         px = ((cx + t_vals * np.cos(a + np.sin(t_vals * 0.19))) % width).astype(int)
@@ -54,8 +55,8 @@ def generate_hell_tile_array(width, height, seed=None):
 
     ember_count = max(1, (width * height) // 1280)
     for _ in range(int(ember_count)):
-        ex, ey = np.random.randint(0, width), np.random.randint(0, height)
-        radius = np.random.randint(2, 4)
+        ex, ey = rng.integers(0, width), rng.integers(0, height)
+        radius = rng.integers(2, 4)
         y_slice = slice(max(0, ey - radius), min(height, ey + radius + 1))
         x_slice = slice(max(0, ex - radius), min(width, ex + radius + 1))
 
@@ -95,10 +96,11 @@ def _cleanup_cache(force: bool = False):
     for entry in _TILE_CACHE.values():
         total += entry["size"]
 
-    # Remove expired files first.
+    # Remove expired files first. A forced cleanup only evicts entries no
+    # widget references anymore; live tiles must survive.
     for key in list(_TILE_CACHE.keys()):
         entry = _TILE_CACHE[key]
-        if force or now - entry["last_used"] > ttl:
+        if (force and entry["refcount"] <= 0) or now - entry["last_used"] > ttl:
             _TILE_CACHE.pop(key, None)
             try:
                 if os.path.isfile(entry["path"]):

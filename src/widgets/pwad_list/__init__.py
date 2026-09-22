@@ -138,6 +138,26 @@ class PWadList(QTreeWidget):
             self.orderChanged.emit()
         return True
 
+    def refresh_statuses(self):
+        """Re-stat every row so READY/MISSING reflects the current filesystem
+        (files may be downloaded into place or deleted externally)."""
+        changed = False
+        for item in self.getItems():
+            path = item.data(0, Qt.UserRole)
+            if not path:
+                continue
+            exists = os.path.isfile(path)
+            label = "READY" if exists else "MISSING"
+            if item.text(4) != label:
+                item.setText(4, label)
+                changed = True
+            if exists:
+                item.setData(4, Qt.ForegroundRole, None)
+            else:
+                item.setForeground(4, Qt.red)
+        if changed:
+            self.orderChanged.emit()
+
     def _renumber(self):
         for index, item in enumerate(self.getItems(), start=1):
             item.setText(0, f"{index:02d}")

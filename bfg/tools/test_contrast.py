@@ -64,16 +64,8 @@ Lumps: 2,847
         
         # Create test launch button
         button_layout = QHBoxLayout()
-        
-        # Dummy inputs for the launch button
-        port_input = PathInput()
-        iwad_input = IWadInput()
-        pwad_list = PWadList()
-        options_input = QLineEdit()
-        
-        self.launch_button = LaunchButton(
-            port_input, iwad_input, pwad_list, options_input, None, None
-        )
+
+        self.launch_button = LaunchButton()
         
         button_layout.addStretch()
         button_layout.addWidget(self.launch_button)

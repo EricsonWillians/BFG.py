@@ -36,8 +36,6 @@ class BloodTextureCache:
         while total_bytes > cls._max_bytes() and len(cls._cache) > 0:
             _, entry = cls._cache.popitem(last=False)
             total_bytes -= entry["bytes"]
-            if isinstance(entry.get("pixmap"), QPixmap):
-                entry["pixmap"] = QPixmap()
 
     def get_texture(self, width, height, frame):
         key = (width, height, frame)
@@ -53,9 +51,7 @@ class BloodTextureCache:
         }
         self._cache[key] = entry
         if len(self._cache) > self._cache_limit:
-            _, removed = self._cache.popitem(last=False)
-            if isinstance(removed.get("pixmap"), QPixmap):
-                removed["pixmap"] = QPixmap()
+            self._cache.popitem(last=False)
         self._flush_if_needed()
         return pixmap
 

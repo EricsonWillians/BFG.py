@@ -86,9 +86,10 @@ class PerformanceSettings:
 
     def __init__(self):
         self._data = PerformanceSettingsData().__dict__.copy()
-        # Keys explicitly set via BFG_* env vars; these win over profile
-        # presets and config-file values.
+        # Keys explicitly set via BFG_* env vars or the config file's
+        # "performance" block; these win over profile presets.
         self._env_keys = set()
+        self._config_keys = set()
         self.animation_runtime = AnimationRuntime(self)
         # Apply the profile preset FIRST so env overrides (loaded next) win.
         self.apply_profile(self._data.get("render_profile", "high"))
@@ -139,8 +140,8 @@ class PerformanceSettings:
         if profile not in self.PROFILE_PRESETS:
             profile = "high"
         for key, value in self.PROFILE_PRESETS[profile].items():
-            if key in self._env_keys:
-                continue  # explicit env override wins over the preset
+            if key in self._env_keys or key in self._config_keys:
+                continue  # explicit env/config override wins over the preset
             self._data[key] = value
         self._data["render_profile"] = profile
         self.animation_runtime.set_profile(profile)
@@ -168,6 +169,7 @@ class PerformanceSettings:
             value = getattr(performance_config, config_key, None)
             if value is not None:
                 self._data[setting] = value
+                self._config_keys.add(setting)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)

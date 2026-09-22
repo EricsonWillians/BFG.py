@@ -155,6 +155,11 @@ class ModPanel(QGroupBox):
             if item.data(0, Qt.UserRole)
         ]
 
+    def refresh_statuses(self):
+        """Re-stat READY/MISSING for all rows and update the header count."""
+        self.pwadList.refresh_statuses()
+        self._refresh_count()
+
     def removeSelected(self):
         selected = self.pwadList.selectedItems()
         if not selected:

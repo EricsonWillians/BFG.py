@@ -101,7 +101,8 @@ class MainWindow(QMainWindow):
             with open(theme_file, 'r') as fh:
                 self.setStyleSheet(fh.read())
 
-        self.show()
+        # NOTE: no self.show() here; the CLI entry point shows the window
+        # after construction (avoids a double show).
 
     def setupResponsiveLayout(self):
         self.mainLayout = QVBoxLayout(self.centralWidget)
@@ -183,7 +184,14 @@ class MainWindow(QMainWindow):
 
     def addWidgets(self):
         self.config = self.config.normalized()
-        self.config.render_profile = self.config.render_profile
+
+        # Readiness re-checks stat the filesystem (resolve_source_port +
+        # is_file per mod); debounce so typing doesn't stall the UI thread.
+        # Created before any widgets connect to it.
+        self._readiness_timer = QTimer(self)
+        self._readiness_timer.setSingleShot(True)
+        self._readiness_timer.setInterval(250)
+        self._readiness_timer.timeout.connect(self._update_readiness)
 
         self.sourcePortGroup = QGroupBox("1. ENGINE / SOURCE PORT")
         sourcePortLayout = QVBoxLayout(self.sourcePortGroup)
@@ -194,7 +202,7 @@ class MainWindow(QMainWindow):
         self.sourcePortPathInput.setText(self.config.source_port_path)
         self.sourcePortPathInput.setCursorPosition(0)
         self.sourcePortPathInput.installEventFilter(self)
-        self.sourcePortPathInput.textChanged.connect(self._update_readiness)
+        self.sourcePortPathInput.textChanged.connect(self._readiness_timer.start)
 
         self.sourcePortBrowseButton = QPushButton('Browse...')
         self.sourcePortBrowseButton.setToolTip('Open a file browser to select the source port executable')
@@ -226,7 +234,7 @@ class MainWindow(QMainWindow):
         self.iwadInput.setText(self.config.iwad_path)
         self.iwadInput.setCursorPosition(0)
         self.iwadInput.installEventFilter(self)
-        self.iwadInput.textChanged.connect(self._update_readiness)
+        self.iwadInput.textChanged.connect(self._readiness_timer.start)
 
         self.iwadBrowseButton = QPushButton('Browse...')
         self.iwadBrowseButton.setToolTip('Select an IWAD file')
@@ -274,7 +282,9 @@ class MainWindow(QMainWindow):
         self.loadingWindow = LostSoulWindow(self)
 
         self.updatePWadInfo()
-        self._maybe_auto_detect_iwad(show_status=False)
+        # Deferred: IWAD auto-detection iterdirs many roots and walks Steam
+        # libraries; keep it off the pre-paint startup path.
+        QTimer.singleShot(0, lambda: self._maybe_auto_detect_iwad(show_status=False))
 
         self.installResponsiveLayout()
         self.set_render_profile(self.config.render_profile)
@@ -459,29 +469,23 @@ class MainWindow(QMainWindow):
 
 
     def addPWads(self, wads: list):
-        dialog = self.loadingWindow
-        dialog.setRange(0, len(wads))
-        dialog.setValue(0)
-        dialog.show()
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        duplicate_count = 0
-        seen = set()
-        try:
-            for i, wad in enumerate(wads):
-                dialog.setValue(i)
-                if wad in seen or wad in self.modPanel.allPaths():
-                    msg = f"The wad {wad} has already been added to the wad list."
-                    self.errorDialog.showMessage(msg)
-                    duplicate_count += 1
-                QApplication.processEvents()
-                seen.add(wad)
-            dialog.setValue(len(wads))
-        finally:
-            QApplication.restoreOverrideCursor()
-            dialog.hide()
-        self.modPanel.addMods(wads)
-        if duplicate_count and duplicate_count == len(wads):
+        # Filter duplicates up front; the old loop only produced one modal
+        # popup per duplicate and called QApplication.processEvents(), which
+        # allowed re-entrant launches/saves while the list was half-processed.
+        existing = set(self.modPanel.allPaths())
+        new_wads = [wad for wad in dict.fromkeys(wads) if wad not in existing]
+        skipped = len(wads) - len(new_wads)
+
+        if new_wads:
+            self.modPanel.addMods(new_wads)
+        if skipped and not new_wads:
             self.statusBar().showMessage("No new mods were added.", 2500)
+        elif skipped:
+            self.statusBar().showMessage(
+                f"Added {len(new_wads)} mod(s); skipped {skipped} duplicate(s).", 4000
+            )
+        elif new_wads:
+            self.statusBar().showMessage(f"Added {len(new_wads)} mod(s).", 2500)
         self.saveConfig()
 
     def removeSelectedPWads(self):
@@ -491,11 +495,13 @@ class MainWindow(QMainWindow):
     def _on_browser_add(self, paths: list):
         self.modPanel.addMods(paths)
         self.saveConfig()
+        self.modPanel.refresh_statuses()
         self._update_readiness()
 
     def _focus_mod_browser(self):
         self.wadFinder.show()
         self.wadFinder.browserTabs.setCurrentIndex(0)
+        self.openWadFinderAction.setChecked(True)
         if not self.wadFinder.expandBrowserButton.isChecked():
             self.wadFinder.expandBrowserButton.setChecked(True)
         self.wadFinder.searchInput.setFocus()
@@ -774,6 +780,7 @@ class MainWindow(QMainWindow):
 
     def _on_launch_error(self, message: str):
         self.logWindow.append(f"ERROR: {message}")
+        self.logWindow.flush()
         self.errorDialog.showMessage(message)
         self.statusBar().showMessage(message, 5000)
         self.loadingWindow.hide()
@@ -783,6 +790,7 @@ class MainWindow(QMainWindow):
     def _on_launch_finished(self, exit_code, reason: Optional[str]):
         self.launchButton.set_loading(False)
         self._set_launch_busy(False)
+        self.logWindow.flush()
         self.loadingWindow.hide()
 
         self._last_launch_status["exit_code"] = exit_code
@@ -826,12 +834,22 @@ class MainWindow(QMainWindow):
         width = event.size().width()
         height = event.size().height()
 
-        if width < 700:
+        # Drag-resizing fires dozens of resizeEvents; each setSpacing/
+        # setContentsMargins call triggers a full-window relayout. Only
+        # re-apply when the layout bucket actually changes.
+        bucket = 0 if width < 700 else (2 if width > 1200 else 1)
+        compact = height < 760
+        resize_key = (bucket, compact, width < 700 or height < 500)
+        if resize_key == getattr(self, "_last_resize_key", None):
+            return
+        self._last_resize_key = resize_key
+
+        if bucket == 0:
             self.mainLayout.setSpacing(8)
             self.mainLayout.setContentsMargins(8, 8, 8, 8)
             self.leftLayout.setSpacing(6)
             self.rightLayout.setSpacing(8)
-        elif width > 1200:
+        elif bucket == 2:
             self.mainLayout.setSpacing(20)
             self.mainLayout.setContentsMargins(20, 16, 20, 16)
             self.leftLayout.setSpacing(12)
@@ -852,15 +870,21 @@ class MainWindow(QMainWindow):
                 self.lostSoulWidget.hide()
                 self.wadFinder.setCompactMode(False)
                 return
-            compact = height < 760
             self.lostSoulWidget.setPlaybackPaused(compact)
             self.lostSoulWidget.setVisible(not compact)
             if hasattr(self, "wadFinder"):
                 self.wadFinder.setCompactMode(compact)
-            if width < 700 or height < 500:
+            if resize_key[2]:
                 self.lostSoulWidget.setMinimumSize(140, 60)
             else:
                 self.lostSoulWidget.setMinimumSize(160, 72)
+
+    def changeEvent(self, event):
+        # Re-stat READY/MISSING when the window regains focus so mods
+        # downloaded into place (or deleted externally) are reflected.
+        if event.type() == QEvent.WindowActivate:
+            self.modPanel.refresh_statuses()
+        super().changeEvent(event)
 
     def closeEvent(self, event):
         try:

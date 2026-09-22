@@ -8,8 +8,10 @@ class OpenWadFinder(QAction):
         self.setShortcut('Ctrl+B')
         self.setStatusTip('Show or hide the mod browser')
         self.wadFinder = wadFinder
-        self.triggered.connect(self.setVisible)
+        # Do NOT shadow QAction.setVisible (the old zero-arg override crashed
+        # any standard setVisible(bool) call on this action). Drive the
+        # browser widget from the action's checked state instead.
+        self.triggered.connect(self._on_triggered)
 
-    def setVisible(self):
-        isVisible = self.wadFinder.isVisible()
-        self.wadFinder.setVisible(not isVisible)
+    def _on_triggered(self, checked: bool):
+        self.wadFinder.setVisible(bool(checked))
