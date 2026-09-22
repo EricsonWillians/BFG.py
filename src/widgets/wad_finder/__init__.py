@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import os
+import shutil
 import tempfile
 from html import escape, unescape
 import re
@@ -57,6 +59,8 @@ DEFAULT_EXTENSIONS = (".wad", ".pk3", ".ipk3", ".pk7", ".pke", ".zip")
 INDEX_TTL_SECONDS = 60 * 60 * 6
 DEFAULT_SOURCE_LIMIT = 750
 MAX_CACHED_INDEX_ENTRIES = 5000
+MAX_INDEX_FETCH_BYTES = 64 * 1024 * 1024           # compressed index cap
+MAX_INDEX_DECOMPRESSED_BYTES = 256 * 1024 * 1024   # gzip-bomb guard
 QUERY_STOP_WORDS = {
     "a",
     "an",
@@ -518,16 +522,30 @@ class _SearchWorker(QRunnable):
 
     @staticmethod
     def _fetch_index(url: str) -> str:
-        response = requests.get(
+        # Bounded read: mirrors are auto-discovered/user-editable, so an
+        # oversized or gzip-bombed index must not exhaust memory.
+        with requests.get(
             url,
             headers={"User-Agent": UA},
             timeout=30,
-        )
-        response.raise_for_status()
-
-        data = response.content
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            chunks = []
+            read = 0
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                read += len(chunk)
+                if read > MAX_INDEX_FETCH_BYTES:
+                    raise RuntimeError("index response exceeds the maximum allowed size")
+                chunks.append(chunk)
+        data = b"".join(chunks)
         if data.startswith(b"\x1f\x8b"):
-            data = gzip.decompress(data)
+            with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+                data = gz.read(MAX_INDEX_DECOMPRESSED_BYTES + 1)
+            if len(data) > MAX_INDEX_DECOMPRESSED_BYTES:
+                raise RuntimeError("decompressed index exceeds the maximum allowed size")
         return data.decode("utf-8", errors="ignore")
 
     @staticmethod
@@ -1713,6 +1731,10 @@ class _SearchWorker(QRunnable):
 
 
 class _DownloadWorker(QRunnable):
+    # Mirrors are auto-discovered from crawled pages and user-editable, so
+    # downloads must be bounded: a hostile/broken mirror must not fill the disk.
+    MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
     def __init__(self, token: int, url: str, destination: str):
         super().__init__()
         self.token = token
@@ -1722,7 +1744,11 @@ class _DownloadWorker(QRunnable):
 
     @pyqtSlot()
     def run(self):
+        # Per-process temp name: two BFG instances sharing a library dir must
+        # not clobber each other's partial downloads.
+        tmp = f"{self.destination}.{os.getpid()}.part"
         try:
+            total = 0
             with requests.get(
                 self.url,
                 stream=True,
@@ -1732,14 +1758,28 @@ class _DownloadWorker(QRunnable):
                 response.raise_for_status()
 
                 total = int(response.headers.get("Content-Length", 0) or 0)
+                if total > self.MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError(
+                        f"download too large ({total} bytes; limit is {self.MAX_DOWNLOAD_BYTES})"
+                    )
+                if total > 0:
+                    try:
+                        free = shutil.disk_usage(
+                            str(Path(self.destination).expanduser().parent)
+                        ).free
+                        if total > free:
+                            raise RuntimeError("not enough free disk space for this download")
+                    except OSError:
+                        pass  # cannot stat the filesystem; proceed and let writes fail
                 downloaded = 0
-                tmp = f"{self.destination}.part"
                 with open(tmp, "wb") as fp:
                     for chunk in response.iter_content(chunk_size=64 * 1024):
                         if not chunk:
                             continue
-                        fp.write(chunk)
                         downloaded += len(chunk)
+                        if downloaded > self.MAX_DOWNLOAD_BYTES:
+                            raise RuntimeError("download exceeded the maximum allowed size")
+                        fp.write(chunk)
                         self.signals.progress.emit(self.token, downloaded, total, self.url)
                 if downloaded <= 0:
                     raise RuntimeError("server returned an empty file")
@@ -1754,7 +1794,6 @@ class _DownloadWorker(QRunnable):
                 os.replace(tmp, self.destination)
             self.signals.finished.emit(self.token, self.destination, self.url)
         except Exception as exc:  # pragma: no cover - network path
-            tmp = f"{self.destination}.part"
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
@@ -2048,6 +2087,7 @@ class WadFinder(QWidget):
             except OSError:
                 pass
         self._health_file = self.cache_root / "source_health.json"
+        self._sweep_orphan_parts()
 
         self._thread_pool = QThreadPool.globalInstance()
         self._source_health: Dict[str, Dict[str, Any]] = {}
@@ -2069,7 +2109,9 @@ class WadFinder(QWidget):
         self._local_filter_timer.setInterval(250)
         self._local_filter_timer.timeout.connect(self._refresh_local_library)
 
-        self._load_index_cache()
+        # Deferred: parsing up to 11 x 5000-entry JSON index caches on the UI
+        # thread delays first paint; run it once the event loop starts.
+        QTimer.singleShot(0, self._load_index_cache)
         self._load_source_health_cache()
         self.initUi()
         self._emit_source_state()
@@ -3025,10 +3067,26 @@ class WadFinder(QWidget):
             return
         self._set_library_dir(selected)
 
+    def _sweep_orphan_parts(self):
+        """Remove partial downloads orphaned by killed/crashed sessions."""
+        try:
+            for entry in self.library_dir.iterdir():
+                if ".part" in entry.suffix or entry.name.endswith(".part"):
+                    try:
+                        entry.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
     def _set_library_dir(self, directory: str):
         new_dir = Path(directory).expanduser()
         if not new_dir.exists():
-            new_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                new_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self._set_status(f"Cannot use library folder {new_dir}: {exc}")
+                return
         self.library_dir = new_dir
         self.libraryDirLabel.setText(f"Library folder: {self.library_dir}")
         if callable(self.library_dir_changed):
@@ -5024,7 +5082,12 @@ class WadFinder(QWidget):
             return
         for entry in selected:
             if entry and entry.browser_url:
-                webbrowser.open(entry.browser_url)
+                # browser_url can come from on-disk caches/sidecars; only ever
+                # open http(s) links, never file:/javascript: etc.
+                if urlparse(entry.browser_url).scheme in {"http", "https"}:
+                    webbrowser.open(entry.browser_url)
+                else:
+                    self._set_status(f"Refusing to open non-web URL: {entry.browser_url}")
 
     def _open_selected_local_file(self):
         selected = self._selected_local_files()
@@ -5087,7 +5150,11 @@ class WadFinder(QWidget):
             self._set_status(f"Library: {len(rows)} managed files in {self.library_dir}")
 
     def _open_library_dir(self):
-        self.library_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.library_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._set_status(f"Cannot open library folder {self.library_dir}: {exc}")
+            return
         webbrowser.open(self.library_dir.as_uri())
 
     def _open_selected_local_folder(self):

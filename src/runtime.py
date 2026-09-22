@@ -11,7 +11,7 @@ from typing import List, Optional, Union
 from PyQt5.QtCore import QObject, QCoreApplication, QEventLoop, QTimer, pyqtSignal
 
 from src.config import LauncherConfig
-from src.const import DEFAULT_CONFIG_PATH
+from src.const import DEFAULT_CONFIG_PATH, migrate_legacy_config
 from src.iwad_detection import detect_iwad
 from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve_source_port
 from src.performance import perf_settings
@@ -119,6 +119,10 @@ class ApplicationRuntime(QObject):
         super().__init__(parent)
         self.options = options or RuntimeOptions()
         self.logger = _configure_runtime_logger()
+        if self.options.config_path == DEFAULT_CONFIG_PATH and migrate_legacy_config(
+            self.options.config_path
+        ):
+            self.logger.info("Migrated legacy config to %s", self.options.config_path)
         self.config = LauncherConfig.load(self.options.config_path).normalized()
         self.config = self._apply_cli_overrides(self.config)
         self._apply_known_source_port_discovery()
@@ -163,12 +167,19 @@ class ApplicationRuntime(QObject):
 
     def _apply_known_source_port_discovery(self) -> None:
         source_port = str(self.config.source_port_path).strip()
-        resolved_source, _ = resolve_source_port(source_port, discover=True)
-
-        if resolved_source and resolved_source != source_port:
-            self.config.source_port_path = resolved_source
-            self.config.source_port_dir = str(Path(resolved_source).expanduser().parent)
-            self.log.emit(f"Auto-detected source port: {resolved_source}")
+        if not source_port:
+            # Only auto-detect when nothing is configured. Bare command names
+            # ("gzdoom") must stay as-is: resolving them to an absolute path
+            # here and persisting it would destroy the portable PATH-based
+            # setting and break when the binary moves. Launch-time resolution
+            # (start_launch -> resolve_source_port) handles bare names.
+            from src.source_port_discovery import discover_source_ports
+            ports = discover_source_ports()
+            if ports:
+                resolved_source = ports[0].path
+                self.config.source_port_path = resolved_source
+                self.config.source_port_dir = str(Path(resolved_source).expanduser().parent)
+                self.log.emit(f"Auto-detected source port: {resolved_source}")
 
     def _apply_known_iwad_discovery(self) -> None:
         current_iwad = str(self.config.iwad_path).strip()
@@ -236,9 +247,6 @@ class ApplicationRuntime(QObject):
             self.logger.info("No-GUI launch requires --exit-after-launch for deterministic teardown.")
             print("No-GUI mode requires --exit-after-launch to run launch flow deterministically.")
             return 2
-
-        if self.options.check_config:
-            return 0
 
         app = QCoreApplication.instance() or QCoreApplication([])
         result = {"code": 0}

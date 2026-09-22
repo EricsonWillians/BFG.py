@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import sys
 from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,8 @@ class SourcePortCandidate:
 def _platform_key() -> str:
     if os.name == "nt":
         return "windows"
+    if sys.platform == "darwin":
+        return "darwin"
     return "linux"
 
 
@@ -121,14 +124,15 @@ def discover_port_path_for_name(command: str, *, allow_appimages: bool = True) -
         if windows_exe.exists() and _is_executable(windows_exe):
             candidates.append(_as_resolved(windows_exe))
 
-    # Linux/common install roots.
-    for base in LINUX_SEARCH_PATHS:
-        base_path = Path(base)
-        if not base_path.exists():
-            continue
-        candidate = base_path / command
-        if candidate.exists() and _is_executable(candidate):
-            candidates.append(_as_resolved(candidate))
+    # POSIX install roots (skipped on Windows to avoid wasted stat calls).
+    if os.name != "nt":
+        for base in LINUX_SEARCH_PATHS:
+            base_path = Path(base)
+            if not base_path.exists():
+                continue
+            candidate = base_path / command
+            if candidate.exists() and _is_executable(candidate):
+                candidates.append(_as_resolved(candidate))
 
     # AppImage scans (Linux only).
     if allow_appimages and _platform_key() == "linux":
@@ -187,9 +191,8 @@ def known_aliases() -> List[str]:
 def find_best_match(command: str) -> Optional[Tuple[str, str]]:
     normalized = str(command or "").strip()
     if not normalized:
-        direct = discover_source_ports()
-        if direct:
-            return direct[0].executable, direct[0].path
+        # No engine requested and none configured: nothing to match against.
+        # (Callers that want "any installed port" use discover_source_ports.)
         return None
 
     aliases = {alias.lower() for alias in known_aliases()}

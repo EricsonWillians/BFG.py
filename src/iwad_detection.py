@@ -153,10 +153,11 @@ def _common_search_roots(
 
     direct_roots.extend(_doomsday_env_dirs())
 
-    for raw in _SYSTEM_IWAD_DIRS:
-        candidate = _normalize_dir(raw)
-        if candidate is not None:
-            direct_roots.append(candidate)
+    if os.name != "nt":  # POSIX-only system dirs
+        for raw in _SYSTEM_IWAD_DIRS:
+            candidate = _normalize_dir(raw)
+            if candidate is not None:
+                direct_roots.append(candidate)
 
     recursive_roots.extend(_steam_library_roots())
     return _dedupe_dirs(direct_roots), _dedupe_dirs(recursive_roots)

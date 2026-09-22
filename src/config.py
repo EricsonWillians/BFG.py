@@ -672,7 +672,9 @@ class ConfigStore:
 
         data = json.dumps(payload, indent=2)
         if atomic:
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            # Per-process temp name: two concurrent instances must not
+            # interleave writes to the same tmp file.
+            tmp = self.path.with_suffix(self.path.suffix + f".{os.getpid()}.tmp")
             with tmp.open("w", encoding="utf-8") as fp:
                 fp.write(data)
             if self.path.exists():

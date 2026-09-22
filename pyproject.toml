@@ -36,6 +36,11 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src", "bfg"]
 
+# The UI assets are resolved via BASE_DIR (= site-packages when installed),
+# so they must be shipped at the wheel root alongside the packages.
+[tool.hatch.build.targets.wheel.force-include]
+"assets" = "assets"
+
 [tool.pytest.ini_options]
 # The repo has no automated test suite yet; the *test_*.py files under
 # bfg/tools/ are interactive GUI smoke scripts that must never be collected

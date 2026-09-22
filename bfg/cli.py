@@ -8,11 +8,15 @@ from src.widgets.main_window import MainWindow
 
 def main():
     options = parse_runtime_options(sys.argv[1:])
-    runtime = ApplicationRuntime(options)
 
     if options.version:
-        print(f"BFG.py {runtime.print_version()}")
+        # Short-circuit: skip full runtime init (config load + source-port
+        # discovery) just to print a constant.
+        from src.runtime import VERSION
+        print(f"BFG.py {VERSION}")
         return 0
+
+    runtime = ApplicationRuntime(options)
 
     if options.performance_test:
         return runtime.run_performance_test()
@@ -27,6 +31,9 @@ def main():
 
     app = QApplication(sys.argv)
     window = MainWindow(runtime)
+    if options.exit_after_launch:
+        # Mirror the headless semantics: close the GUI when the game exits.
+        runtime.launch_orchestrator.finished.connect(lambda *args: window.close())
     window.show()
     return app.exec_()
 
