@@ -43,7 +43,7 @@ class ModPanel(QGroupBox):
     modsChanged = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("3. MOD LOADOUT", parent)
+        super().__init__("Mod loadout", parent)
         self._all_items = []
 
         root = QVBoxLayout()
@@ -60,24 +60,22 @@ class ModPanel(QGroupBox):
         header.addWidget(self._countLabel)
         root.addLayout(header)
 
-        self._orderHint = QLabel("TOP LOADS FIRST  //  DROP FILES HERE  //  DEL REMOVES")
+        self._orderHint = QLabel("Load order: top first · drag & drop files · Del removes")
         self._orderHint.setObjectName("mutedHint")
         root.addWidget(self._orderHint)
 
         toolbar = QGridLayout()
         toolbar.setHorizontalSpacing(6)
         toolbar.setVerticalSpacing(6)
-        self.addButton = QPushButton("+ ADD FILES")
-        self.addButton.setObjectName("primaryButton")
+        self.addButton = QPushButton("+ Add files")
         self.addButton.setToolTip("Open file dialog to add .wad/.pk3 files")
         self.addButton.clicked.connect(self.addRequested.emit)
 
-        self.browseButton = QPushButton("FIND ONLINE")
-        self.browseButton.setObjectName("primaryButton")
+        self.browseButton = QPushButton("Find online")
         self.browseButton.setToolTip("Search idgames sources and download mods into your library")
         self.browseButton.clicked.connect(self.browseRequested.emit)
 
-        self.removeButton = QPushButton("REMOVE")
+        self.removeButton = QPushButton("Remove")
         self.removeButton.setToolTip("Remove selected mods")
         self.removeButton.clicked.connect(self.removeSelected)
 
@@ -87,15 +85,15 @@ class ModPanel(QGroupBox):
         self.pwadList.orderChanged.connect(self._on_model_changed)
         self.pwadList.filesDropped.connect(self.addMods)
 
-        self.moveUpButton = QPushButton("MOVE UP")
+        self.moveUpButton = QPushButton("Move up")
         self.moveUpButton.setToolTip("Move selected mods up in launch order")
         self.moveUpButton.clicked.connect(self.pwadList.moveUp)
 
-        self.moveDownButton = QPushButton("MOVE DOWN")
+        self.moveDownButton = QPushButton("Move down")
         self.moveDownButton.setToolTip("Move selected mods down in launch order")
         self.moveDownButton.clicked.connect(self.pwadList.moveDown)
 
-        self.clearButton = QPushButton("CLEAR LOADOUT")
+        self.clearButton = QPushButton("Clear loadout")
         self.clearButton.setObjectName("dangerButton")
         self.clearButton.setToolTip("Remove every mod from this launch; downloaded files stay in the library")
         self.clearButton.clicked.connect(self.clearMods)

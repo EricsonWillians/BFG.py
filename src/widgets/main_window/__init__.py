@@ -8,7 +8,7 @@ from typing import Optional
 
 from PyQt5.Qt import Qt
 from PyQt5.QtCore import QEvent, QTimer, QUrl
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QDesktopServices, QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSplitter,
     QSizePolicy,
     QStatusBar,
@@ -106,13 +107,8 @@ class MainWindow(QMainWindow):
 
     def setupResponsiveLayout(self):
         self.mainLayout = QVBoxLayout(self.centralWidget)
-        self.mainLayout.setSpacing(12)
+        self.mainLayout.setSpacing(10)
         self.mainLayout.setContentsMargins(12, 12, 12, 12)
-
-        self.missionHeader = QLabel("BFG.PY // MISSION CONTROL")
-        self.missionHeader.setObjectName("terminalTitle")
-        self.missionHeader.setFrameStyle(QFrame.Box | QFrame.Raised)
-        self.missionHeader.setAlignment(Qt.AlignCenter)
 
         self.readinessLabel = QLabel("SYSTEM CHECK PENDING...")
         self.readinessLabel.setObjectName("readinessStrip")
@@ -159,7 +155,6 @@ class MainWindow(QMainWindow):
         self.mainSplitter.addWidget(self.rightPanel)
         self.mainSplitter.setStretchFactor(0, 2)
         self.mainSplitter.setStretchFactor(1, 3)
-        self.mainLayout.addWidget(self.missionHeader)
         self.mainLayout.addWidget(self.readinessLabel)
         self.mainLayout.addWidget(self.topConfigPanel)
         self.mainLayout.addWidget(self.mainSplitter, 1)
@@ -193,7 +188,7 @@ class MainWindow(QMainWindow):
         self._readiness_timer.setInterval(250)
         self._readiness_timer.timeout.connect(self._update_readiness)
 
-        self.sourcePortGroup = QGroupBox("1. ENGINE / SOURCE PORT")
+        self.sourcePortGroup = QGroupBox("Engine / source port")
         sourcePortLayout = QVBoxLayout(self.sourcePortGroup)
 
         self.sourcePortPathInput = PathInput()
@@ -226,7 +221,7 @@ class MainWindow(QMainWindow):
         sourcePortActionsLayout.addStretch(1)
         sourcePortLayout.addLayout(sourcePortActionsLayout)
 
-        self.iwadGroup = QGroupBox("2. BASE GAME / IWAD")
+        self.iwadGroup = QGroupBox("Base game (IWAD)")
         iwadLayout = QVBoxLayout(self.iwadGroup)
 
         self.iwadInput = IWadInput()
@@ -256,11 +251,12 @@ class MainWindow(QMainWindow):
         self._save_timer.timeout.connect(self.saveConfig)
         self.modPanel.modsChanged.connect(self._save_timer.start)
 
-        self.optionsGroup = QGroupBox("4. LAUNCH OPTIONS")
+        self.optionsGroup = QGroupBox("Launch options")
         optionsLayout = QVBoxLayout(self.optionsGroup)
 
         self.extraOptionsInput = QLineEdit()
         self.extraOptionsInput.setToolTip('Additional command line arguments')
+        self.extraOptionsInput.setPlaceholderText('+map e1m1  -skill 4  -nomonsters  ...')
         self.extraOptionsInput.setText(self.config.extra_options)
         self.extraOptionsInput.installEventFilter(self)
         optionsLayout.addWidget(self.extraOptionsInput)
@@ -292,6 +288,17 @@ class MainWindow(QMainWindow):
         _ModInfoCache.configure(self.config)
         self.applyWarningsOrErrors()
         self._update_readiness()
+
+        # The online mod browser starts collapsed: the launch flow owns the
+        # window. Ctrl+B (menu) or "Find online" opens it; the splitter
+        # reclaims the space automatically.
+        self.openWadFinderAction.toggled.connect(self._on_browser_toggled)
+        self.openWadFinderAction.setChecked(False)
+        self.rightPanel.hide()
+
+        # Global launch shortcut (Enter in any path field also launches).
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self._onLaunchRequested)
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._onLaunchRequested)
 
     def createMenu(self):
         self.openSourcePortAction = OpenSourcePortAction(
@@ -329,7 +336,6 @@ class MainWindow(QMainWindow):
         fileMenu.addAction(self.openIWadAction)
         fileMenu.addAction(self.openPWadAction)
         self.openWadFinderAction = OpenWadFinder(self, self.wadFinder)
-        self.openWadFinderAction.setChecked(True)
         fileMenu.addAction(self.openWadFinderAction)
         fileMenu.addAction(self.exitAction)
 
@@ -499,14 +505,25 @@ class MainWindow(QMainWindow):
         self._update_readiness()
 
     def _focus_mod_browser(self):
+        self.rightPanel.setVisible(True)
         self.wadFinder.show()
         self.wadFinder.browserTabs.setCurrentIndex(0)
         self.openWadFinderAction.setChecked(True)
-        if not self.wadFinder.expandBrowserButton.isChecked():
-            self.wadFinder.expandBrowserButton.setChecked(True)
         self.wadFinder.searchInput.setFocus()
         self.wadFinder.searchInput.selectAll()
         self.statusBar().showMessage("Search the network, inspect a result, then choose DOWNLOAD + QUEUE.", 5000)
+
+    def _on_browser_toggled(self, checked: bool):
+        # The browser lives in rightPanel alongside the skull strip; when it
+        # is closed the whole panel collapses so the launch flow gets the
+        # full window.
+        checked = bool(checked)
+        if not checked and self.wadFinder.expandBrowserButton.isChecked():
+            # Closing a full-window (expanded) browser: restore the launch
+            # layout first, otherwise both panels end up hidden and the
+            # window is left empty.
+            self.wadFinder.expandBrowserButton.setChecked(False)
+        self.rightPanel.setVisible(checked)
 
     def _set_browser_expanded(self, expanded: bool):
         expanded = bool(expanded)
@@ -845,20 +862,20 @@ class MainWindow(QMainWindow):
         self._last_resize_key = resize_key
 
         if bucket == 0:
+            self.mainLayout.setSpacing(6)
+            self.mainLayout.setContentsMargins(8, 6, 8, 6)
+            self.leftLayout.setSpacing(5)
+            self.rightLayout.setSpacing(6)
+        elif bucket == 2:
+            self.mainLayout.setSpacing(12)
+            self.mainLayout.setContentsMargins(14, 12, 14, 12)
+            self.leftLayout.setSpacing(8)
+            self.rightLayout.setSpacing(10)
+        else:
             self.mainLayout.setSpacing(8)
-            self.mainLayout.setContentsMargins(8, 8, 8, 8)
+            self.mainLayout.setContentsMargins(10, 8, 10, 8)
             self.leftLayout.setSpacing(6)
             self.rightLayout.setSpacing(8)
-        elif bucket == 2:
-            self.mainLayout.setSpacing(20)
-            self.mainLayout.setContentsMargins(20, 16, 20, 16)
-            self.leftLayout.setSpacing(12)
-            self.rightLayout.setSpacing(16)
-        else:
-            self.mainLayout.setSpacing(12)
-            self.mainLayout.setContentsMargins(12, 12, 12, 12)
-            self.leftLayout.setSpacing(8)
-            self.rightLayout.setSpacing(12)
 
         if hasattr(self, 'lostSoulWidget'):
             browser_expanded = (

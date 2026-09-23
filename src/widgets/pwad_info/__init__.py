@@ -397,7 +397,7 @@ class ModMetadataService(QObject):
 class PWadInfo(QGroupBox):
     """Widget showing detailed information about selected mods."""
 
-    def __init__(self, title='MOD INTELLIGENCE'):
+    def __init__(self, title='Mod info'):
         super().__init__(title)
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
