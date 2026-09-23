@@ -377,13 +377,13 @@ QDialog#lostSoulWindow QProgressBar::chunk { background-color: #C43B1D; }
 QGroupBox {
     border: 1px solid #2E2830;
     border-radius: 5px;
-    margin-top: 14px;
+    margin-top: 16px;
     margin-bottom: 4px;
     background: #181419;
     color: #A99C90;
     font-weight: bold;
-    font-size: 9pt;
-    padding-top: 14px;
+    font-size: 10pt;
+    padding-top: 12px;
     padding-left: 6px;
     padding-right: 6px;
     padding-bottom: 6px;
@@ -391,12 +391,14 @@ QGroupBox {
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    padding: 1px 6px;
-    background: transparent;
-    color: #A99C90;
     left: 8px;
-    top: -6px;
-    font-size: 9pt;
+    padding: 0 6px;
+    /* Solid window-colored background: the title cleanly "cuts" the border
+       and never paints outside its safe zone (negative offsets clipped the
+       title text on some font metrics). */
+    background-color: #131015;
+    color: #A99C90;
+    font-size: 10pt;
 }
 
 /* ---------- mod info panel ---------- */

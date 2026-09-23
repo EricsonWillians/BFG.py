@@ -308,7 +308,8 @@ class DoomSoulWidget(QWidget):
                 for x in range(start_x - self._tile_w, end_x, self._tile_w):
                     painter.drawPixmap(x, y, self._tile_pixmap)
         else:
-            painter.fillRect(event.rect(), Qt.black)
+            # Blend into the surrounding surface instead of a black box.
+            painter.fillRect(event.rect(), self.palette().color(self.backgroundRole()))
 
         if self.skull_frame:
             size = int(min(w, h) * 0.82)

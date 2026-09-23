@@ -270,12 +270,17 @@ class MainWindow(QMainWindow):
             skull_gif_path=asset_path("assets/lost_soul.gif"),
             animated_background=self.config.animated_background,
         )
-        # Slim top banner: full width, fixed height, visible in every mode
-        # (collapsed, browser split, and full-window EXPAND).
-        self.lostSoulWidget.setMinimumHeight(64)
-        self.lostSoulWidget.setFixedHeight(72)
-        self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.mainLayout.insertWidget(0, self.lostSoulWidget)
+        # Compact inline skull: sits at the left of the readiness row instead
+        # of occupying a full-width strip of its own.
+        self.lostSoulWidget.setFixedSize(132, 64)
+        self.lostSoulWidget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.readinessRow = QWidget()
+        readinessRowLayout = QHBoxLayout(self.readinessRow)
+        readinessRowLayout.setContentsMargins(0, 0, 0, 0)
+        readinessRowLayout.setSpacing(10)
+        readinessRowLayout.addWidget(self.lostSoulWidget, 0)
+        readinessRowLayout.addWidget(self.readinessLabel, 1)
+        self.mainLayout.insertWidget(0, self.readinessRow)
 
         self.logWindow = LogWindow(self)
         self.loadingWindow = LostSoulWindow(self)
