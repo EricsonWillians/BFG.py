@@ -239,6 +239,9 @@ class MainWindow(QMainWindow):
         iwadInputLayout.addWidget(self.iwadInput, 1)
         iwadInputLayout.addWidget(self.iwadBrowseButton, 0)
         iwadLayout.addLayout(iwadInputLayout)
+        # Keep the input row top-aligned with the engine group's input row;
+        # without a stretch the single row floats to the vertical center.
+        iwadLayout.addStretch(1)
 
         self.modPanel = ModPanel(self)
         self.modPanel.setMods(self.config.pwad_paths)
