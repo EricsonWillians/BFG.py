@@ -405,7 +405,7 @@ class PWadInfo(QGroupBox):
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setObjectName("doomModInfo")
-        self.text.setMinimumHeight(100)
+        self.text.setMinimumHeight(120)
         self.text.setMaximumBlockCount(3000)
         from PyQt5.QtWidgets import QSizePolicy
         self.text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -438,9 +438,9 @@ class PWadInfo(QGroupBox):
 
         if not self._last_paths:
             self.text.setPlainText(
-                "SELECT A MOD TO INSPECT\n\n"
-                "BFG will show file health, map/package contents, and preserved\n"
-                "idgames provenance for mods downloaded through the browser."
+                "Select a mod to inspect.\n\n"
+                "BFG shows file health, package contents,\n"
+                "and idgames provenance for browser downloads."
             )
             return
 

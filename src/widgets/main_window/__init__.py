@@ -270,9 +270,12 @@ class MainWindow(QMainWindow):
             skull_gif_path=asset_path("assets/lost_soul.gif"),
             animated_background=self.config.animated_background,
         )
-        self.lostSoulWidget.setMinimumSize(160, 72)
-        self.lostSoulWidget.setMaximumHeight(96)
-        self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Slim top banner: full width, fixed height, visible in every mode
+        # (collapsed, browser split, and full-window EXPAND).
+        self.lostSoulWidget.setMinimumHeight(64)
+        self.lostSoulWidget.setFixedHeight(72)
+        self.lostSoulWidget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mainLayout.insertWidget(0, self.lostSoulWidget)
 
         self.logWindow = LogWindow(self)
         self.loadingWindow = LostSoulWindow(self)
@@ -354,15 +357,8 @@ class MainWindow(QMainWindow):
         self.leftColumnLayout.addWidget(self.optionsGroup)
         self.leftColumnLayout.addWidget(self.launchButton)
 
-        self.rightSplitter = QSplitter(Qt.Vertical)
-        self.rightSplitter.setChildrenCollapsible(False)
-        self.rightSplitter.addWidget(self.lostSoulWidget)
-        self.rightSplitter.addWidget(self.wadFinder)
-        self.rightSplitter.setStretchFactor(0, 1)
-        self.rightSplitter.setStretchFactor(1, 5)
-        self.rightLayout.addWidget(self.rightSplitter, 1)
+        self.rightLayout.addWidget(self.wadFinder, 1)
         self.mainSplitter.setSizes([360, max(520, self.width() - 360)])
-        self.rightSplitter.setSizes([86, max(520, self.height() - 150)])
 
     def eventFilter(self, source, event):
         if (
@@ -531,8 +527,6 @@ class MainWindow(QMainWindow):
         self.readinessLabel.setVisible(not expanded)
         self.leftColumn.setVisible(not expanded)
         if expanded:
-            self.lostSoulWidget.setPlaybackPaused(True)
-            self.lostSoulWidget.hide()
             self.wadFinder.setCompactMode(False)
             self.mainSplitter.setSizes([0, max(900, self.width())])
             self.statusBar().showMessage(
@@ -883,18 +877,12 @@ class MainWindow(QMainWindow):
                 and self.wadFinder.expandBrowserButton.isChecked()
             )
             if browser_expanded:
-                self.lostSoulWidget.setPlaybackPaused(True)
-                self.lostSoulWidget.hide()
                 self.wadFinder.setCompactMode(False)
                 return
             self.lostSoulWidget.setPlaybackPaused(compact)
             self.lostSoulWidget.setVisible(not compact)
             if hasattr(self, "wadFinder"):
                 self.wadFinder.setCompactMode(compact)
-            if resize_key[2]:
-                self.lostSoulWidget.setMinimumSize(140, 60)
-            else:
-                self.lostSoulWidget.setMinimumSize(160, 72)
 
     def changeEvent(self, event):
         # Re-stat READY/MISSING when the window regains focus so mods

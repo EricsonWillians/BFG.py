@@ -107,12 +107,15 @@ class ModPanel(QGroupBox):
         root.addLayout(toolbar)
 
         self.pwadInfo = PWadInfo()
+        self.pwadInfo.setMinimumWidth(220)
 
-        splitter = QSplitter(Qt.Vertical)
+        # Tree and inspector side by side: in the collapsed (full-width)
+        # layout both fit without scrolling; draggable when space is tight.
+        splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(self.pwadList)
         splitter.addWidget(self.pwadInfo)
-        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
         root.addWidget(splitter, 1)
 

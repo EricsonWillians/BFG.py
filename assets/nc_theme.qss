@@ -4,14 +4,14 @@
 
 /* ---------- palette ----------
    bg window   #131015   panel #1B171D   input #0E0C10   raised #241E26
-   text        #E9E1D6   muted #9A8F85   faint #6E6259
+   text        #E9E1D6   muted #A99C90   faint #7A6E64
    accent      #C43B1D   accent+ #E25822 ember #E8A33D   border #383038 */
 
 QWidget {
     background-color: #131015;
     color: #E9E1D6;
-    font-family: "Fixedsys", "Terminal", "Courier New", monospace;
-    font-size: 10pt;
+    font-family: "Iosevka Nerd Font Mono", "JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
+    font-size: 10.5pt;
 }
 
 QMainWindow {
@@ -26,7 +26,7 @@ QLineEdit, QListWidget, QTreeWidget, QPlainTextEdit, QComboBox {
     color: #E9E1D6;
     border: 1px solid #383038;
     border-radius: 4px;
-    padding: 5px 6px;
+    padding: 6px 7px;
     selection-background-color: #5A1E12;
     selection-color: #FFE9DC;
     font-size: 10pt;
@@ -36,7 +36,7 @@ QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
 }
 QLineEdit:disabled, QTreeWidget:disabled, QPlainTextEdit:disabled {
     background-color: #171419;
-    color: #6E6259;
+    color: #7A6E64;
     border-color: #2A252C;
 }
 
@@ -105,10 +105,10 @@ QTreeWidget::item:selected:!active {
 QTreeWidget:disabled {
     background-color: #141117;
     alternate-background-color: #181419;
-    color: #6E6259;
+    color: #7A6E64;
     border-color: #2A252C;
 }
-QTreeWidget::item:disabled { color: #6E6259; }
+QTreeWidget::item:disabled { color: #7A6E64; }
 
 QTreeWidget#downloadResults, QTreeWidget#modLibrary {
     background-color: #100D13;
@@ -139,7 +139,7 @@ QPushButton:pressed {
 }
 QPushButton:disabled {
     background-color: #1A161C;
-    color: #6E6259;
+    color: #7A6E64;
     border-color: #2A252C;
 }
 QPushButton#primaryButton {
@@ -170,7 +170,7 @@ QPushButton#launchButton {
     border: 1px solid #E25822;
     border-radius: 5px;
     padding: 12px 20px;
-    font-family: "Fixedsys", "Terminal", "Courier New", monospace;
+    font-family: "Iosevka Nerd Font Mono", "JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
     font-size: 14pt;
     font-weight: bold;
     min-height: 40px;
@@ -186,7 +186,7 @@ QPushButton#launchButton:pressed {
 }
 QPushButton#launchButton:disabled {
     background: #2A2226;
-    color: #6E6259;
+    color: #7A6E64;
     border-color: #383038;
 }
 
@@ -215,7 +215,7 @@ QTabWidget::pane {
 }
 QTabBar::tab {
     background: #1B171D;
-    color: #9A8F85;
+    color: #A99C90;
     border: 1px solid #383038;
     border-bottom: none;
     border-top-left-radius: 4px;
@@ -296,8 +296,8 @@ QLabel#terminalTitle {
     font-weight: bold;
 }
 QLabel#mutedHint {
-    color: #9A8F85;
-    font-size: 9pt;
+    color: #A99C90;
+    font-size: 10pt;
     padding: 2px;
 }
 QLabel#readinessStrip {
@@ -323,7 +323,7 @@ QLabel#modCount {
 }
 QLabel#selectionBanner {
     background: #1B171D;
-    color: #9A8F85;
+    color: #A99C90;
     border: 1px solid #383038;
     border-radius: 4px;
     padding: 5px 8px;
@@ -380,7 +380,7 @@ QGroupBox {
     margin-top: 14px;
     margin-bottom: 4px;
     background: #181419;
-    color: #9A8F85;
+    color: #A99C90;
     font-weight: bold;
     font-size: 9pt;
     padding-top: 14px;
@@ -393,7 +393,7 @@ QGroupBox::title {
     subcontrol-position: top left;
     padding: 1px 6px;
     background: transparent;
-    color: #9A8F85;
+    color: #A99C90;
     left: 8px;
     top: -6px;
     font-size: 9pt;
@@ -403,7 +403,7 @@ QGroupBox::title {
 QTextEdit#doomModInfo, QPlainTextEdit#doomModInfo {
     background-color: #1A1210;
     color: #F0D9C8;
-    font-family: "Consolas", "Liberation Mono", "Courier New", monospace;
+    font-family: "Iosevka Nerd Font Mono", "JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
     font-size: 10pt;
     border: 1px solid #4A241C;
     border-radius: 4px;
@@ -436,7 +436,7 @@ QToolTip {
     border: 1px solid #C43B1D;
     border-radius: 3px;
     padding: 4px 6px;
-    font-family: "Fixedsys", "Terminal", "Courier New", monospace;
+    font-family: "Iosevka Nerd Font Mono", "JetBrains Mono", "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
     font-size: 10pt;
 }
 

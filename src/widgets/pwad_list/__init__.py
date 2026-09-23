@@ -43,10 +43,19 @@ class PWadList(QTreeWidget):
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setToolTip('Launch order runs top to bottom. Drag files in, drag rows to reorder, or press Delete to remove.')
-        self.setColumnWidth(0, 42)
-        self.setColumnWidth(1, 210)
-        self.setColumnWidth(2, 58)
-        self.setColumnWidth(3, 76)
+        # Column layout: order marker tiny, name flexible, metadata fixed so
+        # the Status header is never cropped at narrow widths.
+        from PyQt5.QtWidgets import QHeaderView
+        header = self.header()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.setColumnWidth(0, 36)
+        self.setColumnWidth(2, 70)
+        self.setColumnWidth(3, 84)
+        self.setColumnWidth(4, 92)
 
     def moveUp(self):
         """Move the selected items up by one position."""
