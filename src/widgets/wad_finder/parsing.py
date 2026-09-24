@@ -12,7 +12,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections import deque
 from html import unescape
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable
 from urllib.parse import urljoin, urlparse
 
@@ -205,7 +205,7 @@ def parse_idgames_api(
             continue
         parsed.append(
             WadBrowserResult(
-                title=Path(normalized).name,
+                title=PurePosixPath(normalized).name,
                 description="",
                 metadata_text="",
                 source_id=source.get("id", ""),
@@ -327,7 +327,7 @@ def parse_rss(source: dict[str, str], text: str, query: str) -> list[WadBrowserR
 
         parsed.append(
             WadBrowserResult(
-                title=title or Path(remote).name,
+                title=title or PurePosixPath(remote).name,
                 description=description,
                 metadata_text=metadata_text,
                 source_id=source.get("id", ""),
@@ -649,7 +649,9 @@ def candidate_textfile_urls(source: dict[str, str], result: WadBrowserResult) ->
         return []
 
     candidates: list[str] = []
-    path = Path(remote)
+    # Remote paths are URL paths: always join with posix semantics,
+    # regardless of the host OS (Windows would otherwise emit backslashes).
+    path = PurePosixPath(remote)
 
     primary = urljoin(f"{base}/", str(path.with_suffix(".txt")))
     candidates.append(primary)
@@ -682,7 +684,7 @@ def candidate_textfile_urls(source: dict[str, str], result: WadBrowserResult) ->
             path_only = parsed._replace(query="", fragment="").geturl()
             browser_path = urlparse(path_only).path
             if browser_path:
-                candidates.append(urljoin(f"{base}/", str(Path(browser_path).with_suffix(".txt")).lstrip("/")))
+                candidates.append(urljoin(f"{base}/", str(PurePosixPath(browser_path).with_suffix(".txt")).lstrip("/")))
                 candidates.append(path_only)
 
     deduped: list[str] = []
