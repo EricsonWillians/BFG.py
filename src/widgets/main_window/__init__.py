@@ -577,7 +577,7 @@ class MainWindow(QMainWindow):
                 self.config.pwad_dir = str(PurePath(filename[0]).parent)
                 if hasattr(self, "wadFinder"):
                     self.wadFinder.library_dir = Path(self.config.pwad_dir).expanduser()
-                    self.wadFinder._refresh_local_library()
+                    self.wadFinder.refresh_local_library()
         self.saveConfig()
 
     def _on_browser_sources_changed(self, payload: list[dict]):
