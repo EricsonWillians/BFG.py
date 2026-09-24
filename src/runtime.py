@@ -17,7 +17,7 @@ from src.launch_controller import LaunchOrchestrator, build_launch_args, resolve
 from src.performance import perf_settings
 
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 DEFAULT_LOG_LINES = 1200
 DEFAULT_LOG_BYTES = 256_000
 

@@ -21,7 +21,7 @@ deterministic launch validation in one desktop application.
 
 | | |
 | --- | --- |
-| Current version | `3.0.0` |
+| Current version | `3.1.0` |
 | Platforms | Windows, Linux, macOS |
 | Python | 3.10 or newer (source installs only — the Windows `.exe` needs nothing) |
 | UI toolkit | PyQt5 |
