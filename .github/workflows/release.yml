@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows executable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pyinstaller
+
+      - name: Build single-file executable
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "BFG.py" `
+            --add-data "assets;assets" `
+            main.py
+
+      - name: Smoke test executable
+        run: |
+          $version = & dist\BFG.py.exe --version
+          Write-Host $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfg-py-windows
+          path: dist/BFG.py.exe
+          if-no-files-found: error
+
+  build-python-dist:
+    name: Build Python wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfg-py-python-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-python-dist]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp "artifacts/bfg-py-windows/BFG.py.exe" release/
+          cp artifacts/bfg-py-python-dist/*.whl artifacts/bfg-py-python-dist/*.tar.gz release/
+          ls -la release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

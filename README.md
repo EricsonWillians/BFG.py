@@ -1,17 +1,29 @@
+<div align="center">
+
 # BFG.py
+
+**A cross-platform Doom launcher and mod manager with a deliberately chunky
+1990s DOS interface.**
+
+[![CI](https://github.com/EricsonWillians/BFG.py/actions/workflows/ci.yml/badge.svg)](https://github.com/EricsonWillians/BFG.py/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/EricsonWillians/BFG.py?display_name=tag&sort=semver)](https://github.com/EricsonWillians/BFG.py/releases/latest)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#download-windows)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ![BFG.py main window](./assets/screenshot.png)
 
-**BFG.py** is a cross-platform Doom launcher and mod manager with a deliberately
-chunky 1990s DOS interface. It combines source-port and IWAD setup, ordered mod
-loadouts, a managed local library, idgames discovery, preserved download
-metadata, and deterministic launch validation in one desktop application.
+</div>
+
+**BFG.py** combines source-port and IWAD setup, ordered mod loadouts, a managed
+local library, idgames discovery, preserved download metadata, and
+deterministic launch validation in one desktop application.
 
 | | |
 | --- | --- |
 | Current version | `3.0.0` |
 | Platforms | Windows, Linux, macOS |
-| Python | 3.9 or newer |
+| Python | 3.10 or newer (source installs only — the Windows `.exe` needs nothing) |
 | UI toolkit | PyQt5 |
 | Package | `bfg-py` |
 | License | MIT |
@@ -23,8 +35,9 @@ metadata, and deterministic launch validation in one desktop application.
 ## Contents
 
 - [Highlights](#highlights)
+- [Download (Windows)](#download-windows)
 - [Requirements](#requirements)
-- [Quick start](#quick-start)
+- [Run from source](#run-from-source)
 - [First launch](#first-launch)
 - [Using the mod loadout](#using-the-mod-loadout)
 - [Finding and downloading mods](#finding-and-downloading-mods)
@@ -95,19 +108,40 @@ metadata, and deterministic launch validation in one desktop application.
 - Automatically prioritizes core controls in shorter windows.
 - Pauses decorative animation when the browser needs the available space.
 
+## Download (Windows)
+
+The easiest way to run BFG.py — **no Python installation required**:
+
+1. Download **`BFG.py.exe`** from the
+   [latest release](https://github.com/EricsonWillians/BFG.py/releases/latest).
+2. Double-click it. That's it.
+3. Select your source port (for example GZDoom) and a legally obtained IWAD,
+   queue some mods, and press **UNLEASH HELL**.
+
+> **Note:** Windows SmartScreen may warn that the publisher is unknown because
+> the executable is not code-signed. Choose **More info → Run anyway**.
+
+Linux and macOS users can [run from source](#run-from-source) with a single
+command (`uv run bfg`).
+
 ## Requirements
 
-You need:
+### Players using the Windows executable
 
-1. Python 3.9 or newer.
-2. [`uv`](https://docs.astral.sh/uv/) for the recommended installation flow.
-3. A Doom source port, normally GZDoom or another executable that accepts
+1. The `BFG.py.exe` download from the latest release.
+2. A Doom source port, normally GZDoom or another executable that accepts
    `-iwad` and `-file` arguments.
-4. At least one legally obtained IWAD, such as `doom.wad`, `doom2.wad`,
+3. At least one legally obtained IWAD, such as `doom.wad`, `doom2.wad`,
    `plutonia.wad`, or `tnt.wad`.
-5. Internet access only if you want to search or download from remote sources.
+4. Internet access only if you want to search or download from remote sources.
 
-## Quick start
+### Developers running from source
+
+1. Python 3.10 or newer.
+2. [`uv`](https://docs.astral.sh/uv/) for the recommended installation flow.
+3. The same source port and IWAD requirements as above.
+
+## Run from source
 
 Clone the repository and install its locked dependencies:
 
@@ -534,6 +568,35 @@ uv run bfg-perf
 The layout and contrast helpers open Qt windows; close them to finish an
 interactive run. When changing browser behavior, verify both the supported
 minimum size (`960x680`) and a larger desktop window.
+
+### Continuous integration
+
+Every push and pull request to `master` runs the test suite on Linux, Windows,
+and macOS against the oldest and newest supported Python versions (3.10 and
+3.12). See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+### Creating a release
+
+Releases are fully automated by
+[`.github/workflows/release.yml`](.github/workflows/release.yml). To publish a
+new version:
+
+1. Bump `version` in `pyproject.toml` and merge the change to `master`.
+2. Tag and push the release:
+
+   ```bash
+   git tag v3.1.0
+   git push origin v3.1.0
+   ```
+
+3. The pipeline builds the single-file Windows executable (`BFG.py.exe`,
+   packaged with PyInstaller and smoke-tested with `--version`), plus the
+   Python wheel and sdist, and attaches all of them to a new GitHub Release
+   with generated notes.
+
+Windows users then only need to download `BFG.py.exe` from the
+[latest release](https://github.com/EricsonWillians/BFG.py/releases/latest) —
+no Python installation required.
 
 ## Troubleshooting
 
