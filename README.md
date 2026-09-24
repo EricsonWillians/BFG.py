@@ -2,8 +2,9 @@
 
 # BFG.py
 
-**A cross-platform Doom launcher and mod manager with a deliberately chunky
-1990s DOS interface.**
+**Everything between "I installed a source port" and "I'm playing": engine and
+IWAD setup, ordered mod loadouts, online mod discovery, a managed library, and
+validated one-click launching — on Windows, Linux, and macOS.**
 
 [![CI](https://github.com/EricsonWillians/BFG.py/actions/workflows/ci.yml/badge.svg)](https://github.com/EricsonWillians/BFG.py/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/EricsonWillians/BFG.py?display_name=tag&sort=semver)](https://github.com/EricsonWillians/BFG.py/releases/latest)
@@ -15,9 +16,13 @@
 
 </div>
 
-**BFG.py** combines source-port and IWAD setup, ordered mod loadouts, a managed
-local library, idgames discovery, preserved download metadata, and
-deterministic launch validation in one desktop application.
+**BFG.py** removes the tedious parts of playing Doom mods. No more hand-writing
+`-iwad` and `-file` command lines, juggling load order by renaming files,
+hunting through idgames mirrors in a browser tab, or discovering a broken
+download after the game fails to start. Point it at your source port and IWAD,
+queue mods in the order they should load — with drag & drop — and press one
+button. Every path is validated before launch, downloads are integrity-checked,
+and the exact command sent to the engine is shown in the log.
 
 | | |
 | --- | --- |
@@ -100,13 +105,14 @@ deterministic launch validation in one desktop application.
 - Preserve idgames title, source, remote path, description, and download date.
 - Cache expensive local inspection results without blocking the UI.
 
-### Readable 90s presentation
+### Clear, adaptive interface
 
-- Retains the navy, gold, blood-red, monospace DOS aesthetic.
-- Uses explicit high-contrast colors for normal, alternating, hovered, selected,
-  inactive, and disabled rows.
-- Automatically prioritizes core controls in shorter windows.
-- Pauses decorative animation when the browser needs the available space.
+- A live readiness strip answers "can I launch yet?" at a glance.
+- Explicit high-contrast colors distinguish normal, alternating, hovered,
+  selected, inactive, and disabled rows.
+- The layout automatically prioritizes core controls in shorter windows.
+- Decorative animation pauses when the browser needs the space, and can be
+  disabled entirely for low-end hardware.
 
 ## Download (Windows)
 
